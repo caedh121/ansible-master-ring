@@ -7,7 +7,7 @@
 # here should work in CI and vice versa.
 #
 # Build:  docker build -t master-ring-testbox docker/
-# Run:    docker/run.sh   (Linux/macOS)   or   docker/run.ps1 (Windows)
+# Run:    docker/run.sh   (Linux/macOS)   or   docker/run.cmd (Windows)
 
 FROM ubuntu:22.04
 

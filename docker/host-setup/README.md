@@ -19,15 +19,20 @@ admin login.
 ### Usage
 
 ```powershell
-# On the target Windows VM, as Administrator:
-Set-ExecutionPolicy -Scope Process Bypass -Force
+# On the target Windows VM, in an elevated (Administrator) shell:
 
 # 1. Sanity-check the VM before touching anything (recommended):
-.\Install-DockerWSL2.ps1 -Preflight
+.\Install-DockerWSL2.cmd -Preflight
 
 # 2. If preflight looks good, run for real:
-.\Install-DockerWSL2.ps1
+.\Install-DockerWSL2.cmd
 ```
+
+The `.cmd` wrapper bypasses PowerShell's default `ExecutionPolicy`
+(`Restricted` on client Windows) for the current process only, so you
+don't need `Set-ExecutionPolicy` first. If your policy already allows
+local scripts, you can call `.\Install-DockerWSL2.ps1` directly — same
+script, skips the wrapper.
 
 Parameters (all optional):
 
@@ -70,14 +75,15 @@ wsl -d Ubuntu-22.04 -- docker run --rm hello-world
 ```
 
 From here the [testbox](../README.md) will run: `docker/run.sh` (from WSL)
-or `docker\run.ps1` (from Windows, uses the WSL2 backend automatically).
+or `docker\run.cmd` (from Windows, uses the WSL2 backend automatically).
 
 ### Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
 | Preflight: `VirtFirmware: False` | Nested virtualization not exposed. Enable it on the VM (see VMware table above), power-cycle, re-run preflight. |
-| Phase 2 never starts after reboot | RunOnce fires on next *admin* login. Log in as the admin you ran Phase 1 as. If missed, re-run manually: `.\Install-DockerWSL2.ps1 -Phase 2` |
+| Phase 2 never starts after reboot | RunOnce fires on next *admin* login. Log in as the admin you ran Phase 1 as. If missed, re-run manually: `.\Install-DockerWSL2.cmd -Phase 2` |
 | `wsl` prints `HCS_E_HYPERV_NOT_INSTALLED` | Same as row 1 — nested virt missing. |
-| `systemctl` errors in Phase 2 | WSL kernel too old for systemd. Run `wsl --update`, then re-run `.\Install-DockerWSL2.ps1 -Phase 2` |
+| `systemctl` errors in Phase 2 | WSL kernel too old for systemd. Run `wsl --update`, then re-run `.\Install-DockerWSL2.cmd -Phase 2` |
+| PowerShell says *"running scripts is disabled on this system"* | ExecutionPolicy is `Restricted`. Use the `.cmd` wrapper (`.\Install-DockerWSL2.cmd`) — it bypasses the policy for its own process only. |
 | Docker install can't reach `download.docker.com` | Corporate proxy / firewall. Set proxy env vars in WSL (`sudo tee /etc/environment`) before re-running Phase 2. |

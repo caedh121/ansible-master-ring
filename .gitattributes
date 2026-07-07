@@ -15,7 +15,11 @@ docker/tools-check.sh text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
 
-# Windows-native scripts stay with their host's convention.
+# Windows-native scripts. .cmd/.bat should always be CRLF (Windows batch
+# interpreter is picky about that); .ps1 tolerates either but we keep it
+# host-native so devs on Windows don't see spurious diffs.
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
 *.ps1   text
 
 # Binary artefacts we never want line-ending converted.

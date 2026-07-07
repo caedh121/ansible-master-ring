@@ -23,8 +23,12 @@ Windows (Docker Desktop with Linux containers / WSL2):
 ```powershell
 git clone https://github.com/caedh121/ansible-master-ring.git
 cd ansible-master-ring
-.\docker\run.ps1
+.\docker\run.cmd        # .cmd wrapper bypasses PS ExecutionPolicy for you
 ```
+
+If you'd rather invoke the `.ps1` directly (e.g. your ExecutionPolicy is
+already `RemoteSigned` or `Bypass`), use `.\docker\run.ps1` — same script,
+skips the wrapper.
 
 Inside the container:
 
@@ -78,6 +82,7 @@ Record evidence (session IDs, tunnel ports, apply summaries) in
 | `az` / `gcloud` token errors | Re-run `az login` / `gcloud auth login` inside the container; ensure `~/.azure` / `~/.config/gcloud` are mounted read-write (default). |
 | `session-manager-plugin` not found when the SSM tunnel role runs | The image bundles it; if `tools-check` reports it missing, rebuild the image with `docker/run.sh --rebuild`. |
 | Clone fails with 404 | The repo is private: `GH_TOKEN` missing/expired, or the PAT isn't scoped to this repo. |
+| PowerShell says *"running scripts is disabled on this system"* | ExecutionPolicy is `Restricted` (default on client Windows). Use the `.cmd` wrapper (`.\docker\run.cmd`) — it bypasses the policy for its own process only. |
 
 ## Manual fallback
 

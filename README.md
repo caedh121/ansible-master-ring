@@ -75,7 +75,7 @@ with the collection already installed:
 git clone https://github.com/caedh121/ansible-master-ring.git
 cd ansible-master-ring
 docker/run.sh          # Linux/macOS
-.\docker\run.ps1       # Windows (Docker Desktop, Linux containers / WSL2)
+.\docker\run.cmd       # Windows (Docker Desktop, Linux containers / WSL2)
 ```
 
 See [`docker/README.md`](docker/README.md) for the full flow, credential

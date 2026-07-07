@@ -8,7 +8,8 @@
 .PARAMETER Rebuild
     Force a rebuild of the image even if it already exists.
 .EXAMPLE
-    .\docker\run.ps1
+    .\docker\run.cmd    # preferred - .cmd wrapper bypasses PS ExecutionPolicy
+    .\docker\run.ps1    # if your ExecutionPolicy already allows this script
 .NOTES
     Manual fallback - the equivalent commands:
       docker build -t master-ring-testbox docker/
