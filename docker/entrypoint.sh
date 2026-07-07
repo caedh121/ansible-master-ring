@@ -20,9 +20,12 @@ fi
 
 # Install the collection from the mounted checkout. --force overrides the
 # warm ansible.windows / community.general cache baked into the image so
-# whatever galaxy.yml declares wins.
-cd /work/repo/ansible
-ansible-galaxy collection install . --force >/dev/null
+# whatever galaxy.yml declares wins. -p targets the user-level path
+# explicitly so ansible-galaxy does NOT default to ./.ansible/ inside the
+# mounted repo (which would pollute the host checkout and cause a
+# duplicate-install warning from ansible-lint).
+ansible-galaxy collection install /work/repo/ansible --force \
+    -p /root/.ansible/collections >/dev/null
 
 touch /work/TEST-NOTES.md
 
@@ -42,7 +45,8 @@ cat <<BANNER
  Try:
    tools-check                                        # health-check every CLI
    ansible-lint /work/repo/ansible                    # match what CI runs
-   ansible-doc master_ring.windows_remote.aws_ssm_tunnel
+   ls /work/repo/ansible/roles                        # available roles
+   less /work/repo/ansible/roles/aws_ssm_tunnel/README.md  # role docs
 
  Then wire up an inventory (see /work/repo/ansible/playbooks/examples/) and
  run the quick-start playbook for whichever cloud you're testing against.

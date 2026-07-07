@@ -1,1 +1,7 @@
 .aider*
+
+# ansible-galaxy `install .` (no -p) drops collections under ./.ansible/
+# when run from inside the collection root. The testbox entrypoint uses
+# -p /root/.ansible/collections to avoid this, but keep the ignore in
+# case someone runs the install by hand.
+.ansible/

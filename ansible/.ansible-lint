@@ -1,7 +1,8 @@
 ---
-# Start on the "min" profile so CI stays green out of the gate.
-# Bump to "basic" or "moderate" once you've triaged the extra warnings.
-profile: min
+# The collection passes ansible-lint's "production" profile clean, which is
+# the strictest built-in profile. Advertise that: a green CI badge at
+# `production` is a stronger portfolio signal than a green badge at `min`.
+profile: production
 
 exclude_paths:
   - tests/
