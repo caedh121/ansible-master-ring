@@ -55,12 +55,25 @@ needs to know a tunnel exists.
 
 ## Why this exists
 
-Site-to-site VPNs across three clouds are slow, risky, and often not
-permitted. Exposing WinRM to the internet is worse. The cloud-native
-tunnels are already deployed, already audited, already authenticated with
-IAM — this collection puts them behind a single Ansible interface so
-`platform: aws` and `platform: gcp` targets look identical to your
-playbooks.
+One collection, three clouds, one WinRM interface. Concretely:
+
+- **Smaller attack surface.** Access is per-VM, per-session, IAM-gated —
+  not a network-level reach. Targets keep zero inbound path from the
+  internet; the tunnel opens only for the duration of the play.
+- **Uses infrastructure that's already there.** SSM, Bastion, and IAP
+  are provisioned with the VM. Nothing new to stand up on the controller
+  side — no gateways, no routing, no IP allocation.
+- **One variable, three clouds.** `winrm_via: ssm | bastion | iap` picks
+  the transport. Every subsequent task in the play talks WinRM
+  transparently — the other roles never need to know which cloud the
+  target lives in.
+- **Auditable by default.** Every session lands in the cloud's native
+  audit trail (CloudTrail / Activity Log / Cloud Audit Logs) tied to
+  the IAM principal who opened it.
+- **Reboot-aware.** SSM tunnels die on guest reboot; Bastion and IAP
+  tunnels survive. `win_reboot` knows the difference and dispatches to
+  the tunnel-aware `aws_ssm_reboot` for SSM hosts so a reboot doesn't
+  strand the run.
 
 ## Install
 

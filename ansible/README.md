@@ -10,15 +10,16 @@ Manage Windows VMs over WinRM from an on-prem **Linux** Ansible controller acros
 ## The problem
 
 Your Ansible controller sits on-prem (or in one cloud) and needs to configure
-Windows VMs that have **no inbound network path** to the controller: WinRM
-(5985/5986) is not reachable directly. Standing up site-to-site VPNs or opening
-WinRM to the internet is slow, risky, and often not allowed.
+Windows VMs across AWS, Azure, and GCP. Those VMs have **no inbound network
+path** to the controller: WinRM (5985/5986) is not reachable directly, by design.
 
 ## The answer
 
-Each cloud already offers an authenticated, audited, identity-based tunnel to a
-private instance. This collection wraps them so a single inventory + play reaches
-Windows over WinRM through whichever tunnel the target's cloud provides:
+Each cloud ships an identity-based tunnel to a private instance — AWS SSM,
+Azure Bastion, GCP IAP. This collection wraps all three behind one Ansible
+interface so a single inventory + play reaches Windows through whichever
+tunnel the target's cloud provides: per-VM, per-session, IAM-scoped, and
+logged to the cloud's native audit trail.
 
 | Cloud | Tunnel | Underlying CLI |
 |-------|--------|----------------|
