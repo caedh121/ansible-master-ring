@@ -1,0 +1,21 @@
+# ==== customize these per host in inventory ====
+
+ssm_region_name:  "us-west-2"
+remote_port: 5986          # WinRM port on the managed node: 5985=HTTP, 5986=HTTPS
+local_port:                # unique local listener port on the control node (set per host in inventory)
+use_ssm: false
+aws_ssm_winrm_operation_timeout_sec: 120
+aws_ssm_winrm_read_timeout_sec: 300
+aws_ssm_update_connection_facts: true
+ssm_tunnel_state_key: "{{ inventory_hostname }}"
+
+# Path on the control node where per-environment SSM state files are written
+# (port registry, PIDs, session IDs). Override to scope state to a particular
+# environment (e.g. a per-deployment directory).
+ssm_tunnel_state_dir: /tmp/ansible_tunnels
+
+# GCP recovery vars (used only when platform == 'gcp' and the readiness probe
+# reports the SSM agent as Undeliverable) are not defaulted here; the caller
+# must set them when platform == 'gcp':
+#   - gcp_project           - GCP project ID of the target VM.
+#   - gcp_availability_zone  - GCP zone of the target VM.

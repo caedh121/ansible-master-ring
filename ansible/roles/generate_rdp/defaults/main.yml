@@ -1,0 +1,48 @@
+---
+# defaults file for generate_rdp
+#
+# Generates RDP connection artifacts for a Windows VM reachable only through a
+# cloud-native tunnel (AWS SSM, GCP IAP, or Azure Bastion), and optionally
+# emails them to a requester. The launcher artifacts are self-contained
+# PowerShell scripts the end user runs on their own Windows workstation; they
+# open their own tunnel, write a temp .rdp, launch mstsc, and tear the tunnel
+# down on exit.
+
+# REQUIRED (no default) — set by the caller:
+#   platform           : "aws", "azure", or "gcp" — selects which launcher(s)
+#                        to emit.
+#   domain_admin_user  : the username embedded in the generated .rdp/launchers
+#                        (e.g. "EXAMPLE\\Administrator").
+#   rdp_target_host    : inventory hostname of the VM to connect to. Defaults to
+#                        the host the role is applied to.
+
+# Host this role's artifacts target. Defaults to the current inventory host.
+rdp_target_host: "{{ inventory_hostname }}"
+
+# Identifier used in artifact filenames and the email subject/body. Set this to
+# your deployment/environment name. Defaults to the target host.
+rdp_environment_name: "{{ rdp_target_host | default(inventory_hostname) }}"
+
+# Base directory on the controller where artifacts are written.
+rdp_output_dir: "./rdp_artifacts"
+
+# Transport selection is owned by the transport role (imported by this
+# role's tasks): set `winrm_via` (direct|ssm|iap|bastion) explicitly, or
+# let it derive from `platform` + the legacy use_ssm/use_iap/use_azure_bastion
+# flags. No transport flags are defaulted here — the resolver owns the
+# defaults so every consumer agrees.
+
+# AWS SSM launcher: optional AWS CLI profile baked into the launcher.
+rdp_aws_profile: ""
+
+# Optional domain-prefix guard. When true, the role asserts that the NetBIOS
+# prefix of domain_admin_user matches rdp_expected_domain_prefix before writing
+# any artifact — a safety check against emitting an .rdp whose embedded
+# credential targets the wrong domain. Off by default.
+rdp_validate_domain_prefix: false
+rdp_expected_domain_prefix: ""
+
+# Email delivery (optional). Artifacts are emailed only when `requester` is set.
+rdp_email_from: "ansible@localhost"
+smtp_host: "localhost"
+# rdp_source_project: optional free-text label included in the email body.

@@ -1,0 +1,180 @@
+- name: Ensure IAP tunnel state directory exists
+  ansible.builtin.file:
+    path: "{{ tunnel_state_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: IAP Tunnel block
+  delegate_to: localhost
+  become: false
+  block:
+    # Resolved local listener port. Preference order:
+    #   1. caller-supplied local_port (e.g. include_role vars: local_port: ...)
+    #   2. inventory hostvar iap_local_port (set by gcp_ip_inventory.j2)
+    #   3. ansible_port (legacy SSM-style inventories)
+    - name: Set IAP tunnel facts
+      ansible.builtin.set_fact:
+        iap_resolved_port: "{{ local_port | default(hostvars[inventory_hostname].iap_local_port | default(ansible_port | default(''), true), true) }}"
+        iap_target_host: "{{ target_host | default(inventory_hostname) }}"
+        iap_pid_file: "{{ tunnel_state_dir }}/iap_tunnel_{{ target_host | default(inventory_hostname) }}_{{ remote_port }}.pid"
+        iap_port_file: "{{ tunnel_state_dir }}/iap_tunnel_{{ target_host | default(inventory_hostname) }}_{{ remote_port }}.port"
+
+    - name: Require gcloud and ss (iproute2) on control node
+      ansible.builtin.shell: |
+        set -e
+        command -v gcloud >/dev/null
+        command -v ss >/dev/null
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: Require gcp_project, gcp_availability_zone, and a local port
+      ansible.builtin.assert:
+        that:
+          - gcp_project is defined and gcp_project | length > 0
+          - gcp_availability_zone is defined and gcp_availability_zone | length > 0
+          - iap_resolved_port is defined and (iap_resolved_port | string | length) > 0
+        fail_msg: >-
+          gcp_iap_tunnel needs gcp_project, gcp_availability_zone, and
+          a local port (caller local_port, inventory iap_local_port, or
+          ansible_port). Got
+          project='{{ gcp_project | default("") }}',
+          zone='{{ gcp_availability_zone | default("") }}',
+          local_port='{{ iap_resolved_port | default("") }}'.
+
+    # Shared ownership-verified probe (transport/tasks/_tunnel_probe.yml):
+    # reuse only when the recorded PID is alive, is a gcloud IAP tunnel, and
+    # owns the local listener. Registers `tunnel_probe`.
+    - name: Probe existing IAP tunnel
+      ansible.builtin.include_role:
+        name: master_ring.windows_remote.transport
+        tasks_from: _tunnel_probe
+      vars:
+        tunnel_probe_pid_file: "{{ iap_pid_file }}"
+        tunnel_probe_port: "{{ iap_resolved_port }}"
+        tunnel_probe_cmdline: start-iap-tunnel
+
+    - name: Start IAP tunnel for WinRM (background)
+      ansible.builtin.shell: |
+        set -uo pipefail
+        PORT="{{ iap_resolved_port }}"
+
+        # Kill a previously recorded tunnel PID (idempotent reruns within a play).
+        if [ -f "{{ iap_pid_file }}" ]; then
+          old=$(cat "{{ iap_pid_file }}" 2>/dev/null || true)
+          if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+            kill "$old" 2>/dev/null || true
+            sleep 1
+            kill -9 "$old" 2>/dev/null || true
+          fi
+          rm -f "{{ iap_pid_file }}"
+        fi
+
+        # Free the (deterministic, per-pod) local port from any ORPHANED gcloud
+        # IAP tunnel left behind by a previous run that never tore down. Such
+        # orphans keep the local listener open but no longer forward, so a fresh
+        # gcloud cannot bind the port and the readiness check below would other-
+        # wise see the dead orphan port as open and wrongly report success. Only
+        # gcloud IAP tunnel processes bound to this exact port are killed.
+        for p in $(ss -ltnp 2>/dev/null | grep -E "127\.0\.0\.1:$PORT " | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+          if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'start-iap-tunnel'; then
+            kill "$p" 2>/dev/null || true
+            sleep 1
+            kill -9 "$p" 2>/dev/null || true
+          fi
+        done
+
+        IAP_LOG=$(mktemp /tmp/iap_{{ iap_target_host }}_{{ remote_port }}_XXXX.log)
+        echo "$IAP_LOG"
+        # Bind explicitly to 127.0.0.1 (not "localhost"): on dual-stack hosts
+        # localhost can resolve to ::1 first, making gcloud bind [::1]:PORT,
+        # which the IPv4-literal ownership/readiness checks in this role
+        # would never match.
+        nohup gcloud compute start-iap-tunnel \
+          {{ iap_target_host }} {{ remote_port }} \
+          --project={{ gcp_project }} \
+          --zone={{ gcp_availability_zone }} \
+          --local-host-port=127.0.0.1:$PORT \
+          --configuration={{ gcp_iap_configuration }} \
+          >"$IAP_LOG" 2>&1 < /dev/null &
+        pid=$!
+        echo "$pid"
+
+        # The tunnel is ready only when OUR gcloud IAP tunnel (this target+port)
+        # owns the local listener -- not merely that some process holds the port.
+        owns_port() {
+          local q
+          for q in $(ss -ltnp 2>/dev/null | grep -E "127\.0\.0\.1:$PORT " | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+            if tr '\0' ' ' < "/proc/$q/cmdline" 2>/dev/null | grep -q "start-iap-tunnel {{ iap_target_host }} {{ remote_port }} "; then
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        for i in $(seq 1 30); do
+          if owns_port && (echo > /dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then
+            exit 0
+          fi
+          if ! kill -0 "$pid" 2>/dev/null && ! owns_port; then
+            echo "IAP tunnel exited before owning local port $PORT." >&2
+            cat "$IAP_LOG" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "Timed out waiting for IAP tunnel to own local port $PORT." >&2
+        cat "$IAP_LOG" >&2
+        kill "$pid" 2>/dev/null || true
+        exit 1
+      args: { executable: /bin/bash }
+      register: iap_start
+      until: iap_start.rc == 0
+      retries: 5
+      delay: 10
+      changed_when: iap_start.rc == 0
+      when: tunnel_probe.rc != 0
+
+    - name: Save IAP tunnel PID and log
+      ansible.builtin.set_fact:
+        iap_pid: "{{ (iap_start.stdout_lines | last) | int }}"
+        iap_log: "{{ (iap_start.stdout_lines | first) }}"
+      when: iap_start is defined and iap_start is not skipped and iap_start.rc | default(1) == 0
+
+    - name: Write IAP tunnel PID to state file
+      ansible.builtin.copy:
+        content: "{{ iap_pid }}\n"
+        dest: "{{ iap_pid_file }}"
+        mode: '0600'
+      when: iap_pid is defined
+
+    - name: Write IAP tunnel local port to state file
+      ansible.builtin.copy:
+        content: "{{ iap_resolved_port }}\n"
+        dest: "{{ iap_port_file }}"
+        mode: '0600'
+      when: iap_pid is defined
+
+    - name: Wait for local TCP listener
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ iap_resolved_port }}"
+        timeout: 120
+
+# Repoint the inventory host's connection vars at the local tunnel endpoint so
+# subsequent tasks in the play talk to the VM through this IAP tunnel. Only do
+# this when the tunnel was opened to the host the role is being applied to
+# (target_host == inventory_hostname) -- a tunnel opened to a different host
+# (e.g. the DDC orchestration API on 443) must not hijack this host's WinRM
+# connection.
+- name: Point host connection vars at the IAP tunnel
+  ansible.builtin.set_fact:
+    ansible_host: localhost
+    ansible_port: "{{ iap_resolved_port }}"
+  when:
+    - iap_update_connection_facts | bool
+    - (target_host | default(inventory_hostname)) == inventory_hostname
+    - iap_resolved_port is defined
+    - iap_resolved_port | string | length > 0

@@ -1,0 +1,3 @@
+# ==== customize these ====
+use_ssm: false
+ssm_tunnel_state_dir: /tmp/ansible_tunnels

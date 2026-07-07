@@ -1,0 +1,38 @@
+# Defaults for gcp_iap_tunnel
+#
+# Opens an IAP TCP tunnel from the Ansible control node to the WinRM port on a
+# GCP Windows VM, so Ansible can reach WinRM via localhost without SSM.
+
+# Target VM in GCP to tunnel to. Defaults to the inventory host the role is
+# applied to; can be overridden by callers that need to tunnel to a different
+# host (for example, an orchestration API on port 443).
+target_host: "{{ inventory_hostname }}"
+
+# WinRM port on the managed node: 5985 HTTP / 5986 HTTPS. Other valid
+# remote_port values include 443 for an HTTPS orchestration API.
+remote_port: 5986
+
+# Local listener port on the control node. Set per host in inventory.
+local_port:
+
+# gcloud CLI configuration name to pass via --configuration.
+gcp_iap_configuration: default
+
+# Gate flag consumed by callers. Defaults to true so that GCP environments
+# pick up the IAP tunnel without needing per-env vars; set `use_iap: false`
+# explicitly to opt out.
+use_iap: true
+
+# When false, open the tunnel but do NOT repoint the host's
+# ansible_host/ansible_port at it. Used for side tunnels that must not hijack
+# the host's WinRM connection (e.g. aws_ssm_tunnel's GCP agent-recovery path).
+iap_update_connection_facts: true
+
+# Where per-host IAP state files (PID, port) are written on the control node.
+# Falls back to ssm_tunnel_state_dir for consistency with the AWS SSM role,
+# then to /tmp/ansible_tunnels.
+tunnel_state_dir: "{{ ssm_tunnel_state_dir | default('/tmp/ansible_tunnels') }}"
+
+# GCP locator vars (required, not defaulted here):
+#   gcp_project           - GCP project ID of the target VM.
+#   gcp_availability_zone  - GCP zone of the target VM.

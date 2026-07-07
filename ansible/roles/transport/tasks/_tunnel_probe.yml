@@ -1,0 +1,44 @@
+---
+# Shared existing-tunnel probe, used by gcp_iap_tunnel and azure_bastion_tunnel
+# so the ownership-verification logic lives in exactly one place.
+#
+# Reuse an existing tunnel only if the recorded PID is still alive, is actually
+# the expected tunnel process (matched via /proc/<pid>/cmdline), AND owns the
+# local listener port (via ss). Checking only that the port is open is unsafe:
+# an orphaned/dead tunnel from a previous run keeps its local listener open
+# (so the port accepts TCP) yet no longer forwards traffic, which makes WinRM
+# hang.
+#
+# Parameters (pass via include_role vars):
+#   tunnel_probe_pid_file - path of the recorded .pid state file
+#   tunnel_probe_port     - local listener port to verify ownership of
+#   tunnel_probe_cmdline  - token that must appear in the owning process's
+#                           cmdline ("start-iap-tunnel" | "bastion tunnel")
+#
+# Registers `tunnel_probe` (rc 0 = reusable tunnel found; stdout says why not).
+- name: Probe existing tunnel
+  ansible.builtin.shell: |
+    set -uo pipefail
+    PORT="{{ tunnel_probe_port }}"
+    PID_FILE="{{ tunnel_probe_pid_file }}"
+    ADDR_RE="(127\.0\.0\.1|\[::1\]|0\.0\.0\.0|\*|\[::\]):$PORT "
+    if [ ! -f "$PID_FILE" ]; then
+      echo "no-pid-file"; exit 1
+    fi
+    pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      echo "stale-pid"; exit 1
+    fi
+    if ! tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q '{{ tunnel_probe_cmdline }}'; then
+      echo "pid-not-tunnel"; exit 1
+    fi
+    if ! ss -ltnp 2>/dev/null | grep -E "$ADDR_RE" | grep -q "pid=$pid,"; then
+      echo "pid-not-listening"; exit 1
+    fi
+    echo "alive:$pid"
+  args: { executable: /bin/bash }
+  delegate_to: localhost
+  become: false
+  register: tunnel_probe
+  changed_when: false
+  failed_when: false

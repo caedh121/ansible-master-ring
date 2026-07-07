@@ -1,0 +1,28 @@
+---
+# Reboot dispatch, keyed on the resolved WinRM transport:
+#   - iap / bastion: plain win_reboot over the tunneled WinRM connection. Both
+#     tunnels are held open by control-node processes (gcloud / az) and survive
+#     the guest reboot, so no tunnel re-open is needed.
+#   - direct: plain win_reboot over direct WinRM.
+#   - ssm: aws_ssm_reboot — the SSM session is tied to the guest agent and DIES
+#     on reboot, so the reboot is issued via the SSM document and the
+#     port-forward is re-established after the host comes back.
+# The transport comes from winrm_via (explicit) or is derived from
+# platform + the legacy use_* flags by the transport role — the single
+# source of truth shared with generate_rdp and caller playbooks.
+- name: Resolve WinRM transport
+  ansible.builtin.import_role:
+    name: master_ring.windows_remote.transport
+
+- name: Reboot via Ansible WinRM
+  ansible.windows.win_reboot:
+    pre_reboot_delay: "{{ reboot_pre_delay }}"
+    reboot_timeout: "{{ reboot_timeout }}"
+    post_reboot_delay: "{{ reboot_post_delay }}"
+  ignore_unreachable: true
+  when: winrm_via_resolved in ['direct', 'iap', 'bastion']
+
+- name: Reboot via SSM
+  ansible.builtin.import_role:
+    name: master_ring.windows_remote.aws_ssm_reboot
+  when: winrm_via_resolved == 'ssm'

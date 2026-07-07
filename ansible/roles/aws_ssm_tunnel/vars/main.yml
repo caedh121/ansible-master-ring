@@ -1,0 +1,73 @@
+---
+# Shared shell scripts used by more than one task in this role. Defined once
+# so the initial and post-restart variants cannot drift apart.
+
+# Agent readiness probe (debounce): send a no-op PowerShell command and block
+# on `wait command-executed`. send-command returning rc=0 only proves the API
+# accepted the call; the wait is what proves the agent actually ran it. On
+# failure, dump the per-plugin invocation status JSON for diagnosis.
+# Parameter (task vars): aws_ssm_probe_comment — the --comment string.
+aws_ssm_agent_probe_script: |
+  set -uo pipefail
+  CMD_ID=$(aws ssm send-command \
+    --instance-ids {{ instance_id }} \
+    --region {{ ssm_region_name }} \
+    --document-name AWS-RunPowerShellScript \
+    --comment "{{ aws_ssm_probe_comment | default('Tunnel readiness probe') }}" \
+    --parameters 'commands=["Write-Output ready"]' \
+    --query "Command.CommandId" \
+    --output text)
+  rc=$?
+  if [ $rc -ne 0 ] || [ -z "$CMD_ID" ]; then
+    echo "send-command failed (rc=$rc)" >&2
+    exit 1
+  fi
+  echo "CommandId: $CMD_ID"
+  aws ssm wait command-executed \
+    --command-id "$CMD_ID" \
+    --instance-id {{ instance_id }} \
+    --region {{ ssm_region_name }}
+  wait_rc=$?
+  if [ $wait_rc -ne 0 ]; then
+    echo "---- list-command-invocations (failure details) ----" >&2
+    aws ssm list-command-invocations \
+      --command-id "$CMD_ID" \
+      --instance-id {{ instance_id }} \
+      --region {{ ssm_region_name }} \
+      --details \
+      --query "CommandInvocations[0].{Status:Status,StatusDetails:StatusDetails,Plugins:CommandPlugins[].{Name:Name,Status:Status,StatusDetails:StatusDetails,Out:Output,StdErr:StandardErrorContent}}" \
+      --output json >&2 || true
+    exit $wait_rc
+  fi
+
+# Background SSM port-forward starter. Echoes the logfile path then the PID,
+# then waits for the local listener to accept TCP. Exits 42 when the session
+# died with TargetNotConnected (agent Online but the data channel is not yet
+# established) so callers can trigger the agent-restart recovery path.
+aws_ssm_port_forward_script: |
+  set -euo pipefail
+  LOGFILE="$(mktemp -p /tmp ssm_tunnel_XXXX.log)"
+  echo "$LOGFILE"
+  nohup aws --region {{ ssm_region_name }} ssm start-session \
+    --target "{{ instance_id }}" \
+    --document-name "AWS-StartPortForwardingSession" \
+    --reason "{{ ssm_tunnel_state_key_resolved }}" \
+    --parameters '{"portNumber":["{{ remote_port }}"],"localPortNumber":["{{ local_port }}"]}' \
+    >"$LOGFILE" 2>&1 < /dev/null &
+  pid=$!
+  echo "$pid"
+  for i in $(seq 1 60); do
+    (echo > /dev/tcp/127.0.0.1/{{ local_port }}) 2>/dev/null && exit 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "SSM port-forward process exited before opening local port {{ local_port }}." >&2
+      cat "$LOGFILE" >&2
+      if grep -q "TargetNotConnected" "$LOGFILE" 2>/dev/null; then
+        exit 42
+      fi
+      exit 1
+    fi
+    sleep 2
+  done
+  echo "Timed out waiting for SSM port-forward to open local port {{ local_port }}." >&2
+  cat "$LOGFILE" >&2
+  exit 1

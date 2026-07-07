@@ -1,0 +1,47 @@
+# --- Shared launcher helpers (generated from _ps_common.ps1.j2) -------------
+# Included by every RDP launcher template so the port-picking, TCP-probe, and
+# process-tree-kill logic exists in exactly one place.
+
+function Get-FreeTcpPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try { return [int]$listener.LocalEndpoint.Port }
+    finally { $listener.Stop() }
+}
+
+function Test-LocalPort {
+    param([int]$Port)
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $asyncResult = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        $connected = $asyncResult.AsyncWaitHandle.WaitOne(500)
+        if ($connected -and $client.Connected) {
+            $client.Close()
+            return $true
+        }
+        $client.Close()
+    }
+    catch { }
+    return $false
+}
+
+# Kills a process and all of its descendants. Needed because the tunnel CLIs
+# are launched through cmd.exe shims (aws/az/gcloud) that fork workers: killing
+# only the parent leaves the actual tunnel process (and the local port) alive.
+function Stop-ProcessTree {
+    param([int]$ProcessId)
+
+    try {
+        $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId"
+        foreach ($child in $children) {
+            Stop-ProcessTree -ProcessId ([int]$child.ProcessId)
+        }
+    }
+    catch { }
+
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+# --- End shared launcher helpers ---------------------------------------------

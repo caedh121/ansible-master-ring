@@ -1,0 +1,206 @@
+---
+# Which artifact(s) to emit is keyed on the resolved WinRM transport — the
+# same single source of truth win_reboot dispatches on, so the RDP artifact a
+# requester receives always matches the transport the host is actually managed
+# over.
+- name: Resolve WinRM transport
+  ansible.builtin.import_role:
+    name: master_ring.windows_remote.transport
+
+- name: Set RDP artifact paths
+  ansible.builtin.set_fact:
+    rdp_downloads_dir: "{{ rdp_output_dir }}"
+    rdp_artifact_path: "{{ rdp_output_dir }}/{{ rdp_environment_name }}.rdp"
+    iap_launcher_path: "{{ rdp_output_dir }}/{{ rdp_environment_name }}-iap-rdp.ps1"
+    azure_bastion_launcher_path: "{{ rdp_output_dir }}/{{ rdp_environment_name }}-azure-bastion-rdp.ps1"
+    aws_ssm_launcher_path: "{{ rdp_output_dir }}/{{ rdp_environment_name }}-aws-ssm-rdp.ps1"
+    rdp_use_aws_ssm_launcher: "{{ (platform | default('') | lower) == 'aws' and winrm_via_resolved == 'ssm' }}"
+    rdp_use_ssm_artifact: "{{ winrm_via_resolved == 'ssm' and (platform | default('') | lower) != 'aws' }}"
+    rdp_use_iap_launcher: "{{ winrm_via_resolved == 'iap' }}"
+    rdp_use_azure_bastion_launcher: "{{ winrm_via_resolved == 'bastion' }}"
+  delegate_to: localhost
+  run_once: true
+
+# domain_admin_user is embedded in every generated artifact, so it must be set.
+- name: Require domain_admin_user
+  ansible.builtin.assert:
+    that:
+      - domain_admin_user is defined
+      - domain_admin_user | length > 0
+    fail_msg: >-
+      generate_rdp requires domain_admin_user — the username embedded in the
+      generated .rdp / launcher artifacts (e.g. "EXAMPLE\\Administrator").
+  delegate_to: localhost
+  run_once: true
+
+# Optional guard: refuse to emit RDP artifacts whose embedded credential targets
+# a domain other than the expected one. Catches stale hostvars / cached values /
+# cross-environment leakage. Enable by setting rdp_validate_domain_prefix=true
+# and rdp_expected_domain_prefix to the expected NetBIOS domain prefix.
+- name: Validate domain_admin_user matches expected domain prefix
+  ansible.builtin.assert:
+    that:
+      - (domain_admin_user.split('\\')[0] | upper) == (rdp_expected_domain_prefix | upper)
+    fail_msg: >-
+      domain_admin_user='{{ domain_admin_user | default('<undefined>') }}'
+      does not match rdp_expected_domain_prefix='{{ rdp_expected_domain_prefix }}'.
+      Refusing to write an RDP file pointing at an unexpected domain.
+  delegate_to: localhost
+  run_once: true
+  when: rdp_validate_domain_prefix | bool
+
+- name: Ensure RDP downloads directory exists
+  ansible.builtin.file:
+    path: "{{ rdp_downloads_dir }}"
+    state: directory
+  delegate_to: localhost
+  run_once: true
+
+- name: Remove stale controller-local AWS SSM RDP file
+  ansible.builtin.file:
+    path: "{{ rdp_artifact_path }}"
+    state: absent
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_aws_ssm_launcher | bool
+
+# Legacy SSM path: the SSM tunnel that gandalf already opened set
+# hostvars[...].ansible_port to the local listener; mstsc points straight at it.
+# AWS uses a workstation-side launcher instead because controller-local ports
+# do not exist on the requester's Windows machine.
+- name: Generate SSM RDP file on controller
+  ansible.builtin.template:
+    src: ssm_rdp.j2
+    dest: "{{ rdp_artifact_path }}"
+  vars:
+    target_port: "{{ hostvars[rdp_target_host]['ansible_port'] }}"
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_ssm_artifact | bool
+
+- name: Validate AWS SSM RDP metadata
+  ansible.builtin.assert:
+    that:
+      - hostvars[rdp_target_host]['ansible_id'] | default('') | length > 0
+      - (hostvars[rdp_target_host]['ansible_aws_ssm_region'] | default(region | default(ssm_region_name | default('')), true)) | length > 0
+    fail_msg: >-
+      AWS SSM RDP launcher needs ansible_id and ansible_aws_ssm_region for
+      rdp_target_host='{{ rdp_target_host }}'.
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_aws_ssm_launcher | bool
+
+- name: Generate AWS SSM RDP launcher (PowerShell) on controller
+  ansible.builtin.template:
+    src: aws_ssm_rdp_launcher.ps1.j2
+    dest: "{{ aws_ssm_launcher_path }}"
+    mode: '0644'
+  vars:
+    aws_rdp_instance_id: "{{ hostvars[rdp_target_host]['ansible_id'] | default('') }}"
+    aws_rdp_region: "{{ hostvars[rdp_target_host]['ansible_aws_ssm_region'] | default(region | default(ssm_region_name | default('')), true) }}"
+    aws_rdp_profile: "{{ rdp_aws_profile | default('') }}"
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_aws_ssm_launcher | bool
+
+# GCP / IAP path: the on-prem control node tunnels WinRM via IAP, but the
+# user's workstation has no such tunnel. Emit a self-contained PowerShell
+# launcher that opens its own `gcloud compute start-iap-tunnel` to the
+# target VM, writes a temp .rdp, launches mstsc, and tears the tunnel
+# down when mstsc exits.
+- name: Validate GCP IAP RDP metadata
+  ansible.builtin.assert:
+    that:
+      - hostvars[rdp_target_host]['gcp_project'] | default(gcp_project | default('')) | length > 0
+      - hostvars[rdp_target_host]['gcp_availability_zone'] | default(gcp_availability_zone | default('')) | length > 0
+    fail_msg: >-
+      GCP IAP RDP launcher needs gcp_project and gcp_availability_zone for
+      rdp_target_host='{{ rdp_target_host }}'.
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_iap_launcher | bool
+
+- name: Generate IAP RDP launcher (PowerShell) on controller
+  ansible.builtin.template:
+    src: iap_rdp_launcher.ps1.j2
+    dest: "{{ iap_launcher_path }}"
+    mode: '0644'
+  vars:
+    gcp_rdp_project: "{{ hostvars[rdp_target_host]['gcp_project'] | default(gcp_project | default('')) }}"
+    gcp_rdp_zone: "{{ hostvars[rdp_target_host]['gcp_availability_zone'] | default(gcp_availability_zone | default('')) }}"
+    gcp_rdp_configuration: "{{ hostvars[rdp_target_host]['gcp_iap_configuration'] | default(gcp_iap_configuration | default('default')) }}"
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_iap_launcher | bool
+
+- name: Validate Azure Bastion RDP metadata
+  ansible.builtin.assert:
+    that:
+      - hostvars[rdp_target_host]['azure_vm_resource_id'] | default('') | length > 0
+      - hostvars[rdp_target_host]['azure_bastion_name'] | default(azure_bastion_name | default(bastion_name | default(''))) | length > 0
+      - hostvars[rdp_target_host]['azure_bastion_resource_group_name'] | default(azure_bastion_resource_group_name | default(bastion_resource_group_name | default(''))) | length > 0
+      - hostvars[rdp_target_host]['azure_bastion_subscription_id'] | default(azure_bastion_subscription_id | default('')) | length > 0
+    fail_msg: >-
+      Azure Bastion RDP launcher needs azure_vm_resource_id, bastion name,
+      bastion resource group, and subscription ID for rdp_target_host='{{ rdp_target_host }}'.
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_azure_bastion_launcher | bool
+
+- name: Generate Azure Bastion RDP launcher (PowerShell) on controller
+  ansible.builtin.template:
+    src: azure_bastion_rdp_launcher.ps1.j2
+    dest: "{{ azure_bastion_launcher_path }}"
+    mode: '0644'
+  vars:
+    azure_rdp_target_resource_id: "{{ hostvars[rdp_target_host]['azure_vm_resource_id'] | default('') }}"
+    azure_rdp_bastion_name: "{{ hostvars[rdp_target_host]['azure_bastion_name'] | default(azure_bastion_name | default(bastion_name | default(''))) }}"
+    azure_rdp_bastion_resource_group_name: "{{ hostvars[rdp_target_host]['azure_bastion_resource_group_name'] | default(azure_bastion_resource_group_name | default(bastion_resource_group_name | default(''))) }}"
+    azure_rdp_bastion_subscription_id: "{{ hostvars[rdp_target_host]['azure_bastion_subscription_id'] | default(azure_bastion_subscription_id | default('')) }}"
+  delegate_to: localhost
+  run_once: true
+  when: rdp_use_azure_bastion_launcher | bool
+
+- name: Collect RDP artifacts to email
+  ansible.builtin.set_fact:
+    rdp_email_attachments: >-
+      {{
+        ([rdp_artifact_path]   if (rdp_use_ssm_artifact | bool) else [])
+        +
+        ([aws_ssm_launcher_path]   if (rdp_use_aws_ssm_launcher | bool) else [])
+        +
+        ([iap_launcher_path]   if (rdp_use_iap_launcher | bool) else [])
+        +
+        ([azure_bastion_launcher_path]   if (rdp_use_azure_bastion_launcher | bool) else [])
+      }}
+    rdp_zip_path: "{{ rdp_downloads_dir }}/{{ rdp_environment_name }}-{{ platform | default('unknown') }}-rdp.zip"
+  delegate_to: localhost
+  run_once: true
+
+- name: Bundle RDP artifacts into a zip for emailing
+  community.general.archive:
+    path: "{{ rdp_email_attachments }}"
+    dest: "{{ rdp_zip_path }}"
+    format: zip
+    force_archive: true
+  delegate_to: localhost
+  run_once: true
+  when: rdp_email_attachments | length > 0
+
+- name: Email RDP artifacts to requester
+  community.general.mail:
+    host: "{{ smtp_host }}"
+    from: "{{ rdp_email_from }}"
+    to: "{{ requester }}"
+    subject: "{{ rdp_environment_name }} ({{ platform | default('unknown') | upper }}) RDP file"
+    body: |-
+      RDP artifacts for {{ rdp_environment_name }} on platform {{ platform | default('unknown') | upper }} are attached (zipped).
+
+      Source project: {{ rdp_source_project | default('n/a') }}
+    attach:
+      - "{{ rdp_zip_path }}"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - requester is defined and requester | length > 0
+    - rdp_email_attachments | length > 0

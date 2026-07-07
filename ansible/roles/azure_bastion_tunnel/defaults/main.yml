@@ -1,0 +1,14 @@
+---
+target_host: "{{ inventory_hostname }}"
+target_resource_id: ""
+remote_port: 5986
+local_port:
+use_azure_bastion: false
+
+azure_bastion_name: ""
+azure_bastion_resource_group_name: ""
+azure_bastion_subscription_id: ""
+azure_bastion_winrm_operation_timeout_sec: 120
+azure_bastion_winrm_read_timeout_sec: 300
+
+tunnel_state_dir: "{{ ssm_tunnel_state_dir | default('/tmp/ansible_tunnels') }}"

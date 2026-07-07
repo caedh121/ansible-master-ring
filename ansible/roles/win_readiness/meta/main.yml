@@ -1,0 +1,18 @@
+galaxy_info:
+  author: Adrian Estrada
+  description: Checks the readiness of a Windows VM.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: CentOS
+      versions:
+        - all
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - readiness
+    - winrm

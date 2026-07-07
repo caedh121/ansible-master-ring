@@ -1,0 +1,19 @@
+galaxy_info:
+  author: Adrian Estrada
+  description: Establishes an Azure Bastion tunnel for WinRM access.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: CentOS
+      versions:
+        - all
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - azure
+    - bastion
+    - winrm

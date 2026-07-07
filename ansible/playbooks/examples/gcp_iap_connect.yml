@@ -1,0 +1,45 @@
+---
+# GCP: reach Windows VMs over WinRM via a GCP IAP TCP tunnel, verify ready,
+# do work, then reboot. The IAP tunnel process runs on the controller and
+# survives the guest reboot, so a plain win_reboot is sufficient.
+#
+# Inventory must set per host:
+#   gcp_project             GCP project ID of the target VM
+#   gcp_availability_zone   GCP zone of the target VM
+#   ansible_port            unique local tunnel port on the controller
+#   ansible_user / ansible_password (+ WinRM connection vars)
+# Optional:
+#   gcp_iap_configuration   gcloud configuration name (default: "default")
+#
+# Run:
+#   ansible-playbook -i inventory playbooks/examples/gcp_iap_connect.yml
+- name: Manage Windows targets on GCP via IAP
+  hosts: windows_targets
+  gather_facts: false
+  vars:
+    platform: gcp
+    winrm_via: iap   # explicit transport; GCP also derives iap by default
+  pre_tasks:
+    - name: Open the IAP tunnel to WinRM
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.gcp_iap_tunnel
+
+    - name: Wait until WinRM + Explorer are up
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.win_readiness
+
+  tasks:
+    - name: Example work over the tunneled WinRM connection
+      ansible.windows.win_ping:
+
+  post_tasks:
+    - name: Reboot (IAP tunnel survives the reboot and reconnects)
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.win_reboot
+      when: reboot_needed | default(false)
+
+  # Optional: tear the IAP tunnel down at the end of the run.
+  # - name: Tear down the IAP tunnel
+  #   ansible.builtin.import_role:
+  #     name: master_ring.windows_remote.gcp_iap_tunnel
+  #     tasks_from: teardown

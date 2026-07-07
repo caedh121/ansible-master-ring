@@ -1,0 +1,45 @@
+---
+# Azure: reach Windows VMs over WinRM via an Azure Bastion tunnel, verify ready,
+# do work, then reboot. The Bastion tunnel process runs on the controller and
+# survives the guest reboot, so a plain win_reboot is sufficient.
+#
+# Inventory must set per host:
+#   azure_vm_resource_id                 full ARM resource ID of the target VM
+#   azure_bastion_name                   Bastion host name
+#   azure_bastion_resource_group_name    Bastion resource group
+#   azure_bastion_subscription_id        subscription ID
+#   ansible_port                         unique local tunnel port on the controller
+#   ansible_user / ansible_password (+ WinRM connection vars)
+#
+# Run:
+#   ansible-playbook -i inventory playbooks/examples/azure_bastion_connect.yml
+- name: Manage Windows targets on Azure via Bastion
+  hosts: windows_targets
+  gather_facts: false
+  vars:
+    platform: azure
+    winrm_via: bastion   # explicit transport; legacy `use_azure_bastion: true` also works
+  pre_tasks:
+    - name: Open the Azure Bastion tunnel to WinRM
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.azure_bastion_tunnel
+
+    - name: Wait until WinRM + Explorer are up
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.win_readiness
+
+  tasks:
+    - name: Example work over the tunneled WinRM connection
+      ansible.windows.win_ping:
+
+  post_tasks:
+    - name: Reboot (Bastion tunnel survives the reboot and reconnects)
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.win_reboot
+      when: reboot_needed | default(false)
+
+  # Optional: tear the Bastion tunnel down at the end of the run.
+  # - name: Tear down the Bastion tunnel
+  #   ansible.builtin.import_role:
+  #     name: master_ring.windows_remote.azure_bastion_tunnel
+  #     tasks_from: teardown

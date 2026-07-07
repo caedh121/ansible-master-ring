@@ -1,0 +1,363 @@
+- name: Ensure SSM state directory exists
+  ansible.builtin.file:
+    path: "{{ ssm_tunnel_state_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: SSM Tunnel block
+  delegate_to: localhost
+  become: false
+  block:
+      - name: Set Facts
+        set_fact:
+          instance_id: "{{ ansible_id }}"
+          ssm_region_name: "{{ ansible_aws_ssm_region | default(ssm_region_name) }}"
+          local_port: "{{ ((local_port | default('', true) | string | length) > 0) | ternary(local_port, ansible_port) }}"
+          remote_port: "{{ remote_port | default(5986, true) }}"
+          ssm_tunnel_state_key_resolved: "{{ ssm_tunnel_state_key | default(inventory_hostname) }}"
+
+      - name: Require aws + session-manager-plugin + curl + openssl
+        ansible.builtin.shell: |
+          set -e
+          command -v aws >/dev/null
+          command -v session-manager-plugin >/dev/null
+          command -v curl >/dev/null
+          command -v openssl >/dev/null
+        args: { executable: /bin/bash }
+
+      - name: Check SSM target is Online
+        ansible.builtin.shell: |
+          aws ssm describe-instance-information \
+          --filters "Key=InstanceIds,Values={{instance_id}}" \
+          --query "InstanceInformationList[?InstanceId=='{{ instance_id }}'].PingStatus | [0]" \
+          --region {{ ssm_region_name }} \
+          --output text
+        args: { executable: /bin/bash }
+        register: ssm_ping
+        changed_when: false
+        failed_when: ssm_ping.stdout | trim not in ["Online", "ConnectionLost"]
+        until: ssm_ping.stdout | trim == "Online"
+        retries: 30
+        delay: 10
+
+      - name: Confirm SSM agent is accepting commands (with platform recovery)
+        block:
+          # Script shared with the post-restart re-confirm (vars/main.yml).
+          - name: Confirm SSM agent is accepting commands (debounce)
+            ansible.builtin.shell: "{{ aws_ssm_agent_probe_script }}"
+            args: { executable: /bin/bash }
+            register: ssm_cmd_probe
+            until: ssm_cmd_probe.rc == 0
+            retries: 8
+            delay: 15
+            changed_when: false
+        rescue:
+          - name: Mark SSM readiness recovery as not attempted
+            ansible.builtin.set_fact:
+              ssm_readiness_recovery_attempted: false
+
+          - name: Recover wedged AmazonSSMAgent by rebooting EC2 instance (AWS)
+            block:
+              - name: Reboot EC2 instance to recover SSM command delivery
+                ansible.builtin.command: >
+                  aws ec2 reboot-instances
+                  --instance-ids {{ instance_id }}
+                  --region {{ ssm_region_name }}
+                changed_when: true
+
+              - name: Wait for EC2 reboot to disrupt SSM
+                ansible.builtin.pause:
+                  seconds: 60
+
+              - name: Wait for EC2 status checks after reboot
+                ansible.builtin.command: >
+                  aws ec2 wait instance-status-ok
+                  --instance-ids {{ instance_id }}
+                  --region {{ ssm_region_name }}
+                changed_when: false
+
+              - name: Wait for SSM target to report Online after EC2 reboot
+                ansible.builtin.shell: |
+                  set -euo pipefail
+                  for _ in $(seq 1 60); do
+                    status=$(aws ssm describe-instance-information \
+                      --filters "Key=InstanceIds,Values={{ instance_id }}" \
+                      --query "InstanceInformationList[?InstanceId=='{{ instance_id }}'].PingStatus | [0]" \
+                      --region {{ ssm_region_name }} \
+                      --output text)
+                    echo "$status"
+                    if [ "$status" = "Online" ]; then
+                      exit 0
+                    fi
+                    sleep 10
+                  done
+                  exit 1
+                args: { executable: /bin/bash }
+                register: ssm_ping_after_ec2_reboot
+                changed_when: false
+                failed_when: false
+
+              - name: Fail if EC2 reboot did not restore SSM command channel
+                ansible.builtin.fail:
+                  msg: >-
+                    EC2 reboot recovery was attempted for {{ inventory_hostname }}
+                    ({{ instance_id }}) and EC2 status checks passed, but SSM did
+                    not return Online within 10 minutes. Last PingStatus:
+                    {{ (ssm_ping_after_ec2_reboot.stdout_lines | default([]) | last) | default('unknown', true) }}.
+                    No SSM control channel is available; manually recover
+                    AmazonSSMAgent or rebuild the host, then re-run.
+                when: ssm_ping_after_ec2_reboot.rc != 0
+
+              - name: Mark SSM readiness recovery as attempted
+                ansible.builtin.set_fact:
+                  ssm_readiness_recovery_attempted: true
+            when:
+              - (platform | default('') | lower) == 'aws'
+              - "instance_id | regex_search('^i-')"
+              - "'CommandId:' in (ssm_cmd_probe.stdout | default(''))"
+              - "'Undeliverable' in (ssm_cmd_probe.stderr | default(''))"
+
+          # Recovery tunnel is opened by the gcp_iap_tunnel role itself
+          # (ownership-verified probe, orphan reaping, state files, teardown)
+          # rather than a weaker hand-rolled gcloud call, so IAP tunnel fixes
+          # land in exactly one place. iap_update_connection_facts=false keeps
+          # the recovery tunnel from repointing this host's connection vars,
+          # which must keep pointing at the (about-to-be-rebuilt) SSM tunnel.
+          - name: Recover wedged AmazonSSMAgent via IAP+WinRM (GCP)
+            block:
+              - name: Choose ephemeral local port for recovery IAP tunnel
+                ansible.builtin.set_fact:
+                  gcp_iap_local_port: "{{ 65000 | random(start=40000) }}"
+
+              - name: Open recovery IAP tunnel to WinRM
+                ansible.builtin.include_role:
+                  name: master_ring.windows_remote.gcp_iap_tunnel
+                vars:
+                  local_port: "{{ gcp_iap_local_port }}"
+                  iap_update_connection_facts: false
+
+              - name: Restart AmazonSSMAgent via WinRM-over-IAP
+                ansible.windows.win_service:
+                  name: AmazonSSMAgent
+                  state: restarted
+                  force_dependent_services: true
+                vars:
+                  ansible_port: "{{ gcp_iap_local_port }}"
+                delegate_to: "{{ inventory_hostname }}"
+            always:
+              - name: Tear down recovery IAP tunnel
+                ansible.builtin.include_role:
+                  name: master_ring.windows_remote.gcp_iap_tunnel
+                  tasks_from: teardown
+                vars:
+                  teardown_remote_port: "{{ remote_port }}"
+              - name: Mark SSM readiness recovery as attempted
+                ansible.builtin.set_fact:
+                  ssm_readiness_recovery_attempted: true
+            when: (platform | default('') | lower) == 'gcp'
+
+          - name: Fail fast if no automatic recovery path is available
+            ansible.builtin.fail:
+              msg: >-
+                SSM agent on {{ inventory_hostname }} ({{ instance_id }}) is
+                Undeliverable and platform is
+                '{{ platform | default("undefined") }}', so no automatic
+                recovery path matched. For AWS this recovery only applies to
+                native EC2 instance IDs after SSM accepts the command. Manually
+                restart AmazonSSMAgent or reboot the host, then re-run.
+            when: not (ssm_readiness_recovery_attempted | default(false) | bool)
+
+          - name: Wait for AmazonSSMAgent to re-register after restart
+            ansible.builtin.pause:
+              seconds: 30
+
+          - name: Re-confirm SSM agent is accepting commands after restart
+            ansible.builtin.shell: "{{ aws_ssm_agent_probe_script }}"
+            args: { executable: /bin/bash }
+            vars:
+              aws_ssm_probe_comment: Tunnel readiness probe (post-restart)
+            register: ssm_cmd_probe_retry
+            until: ssm_cmd_probe_retry.rc == 0
+            retries: 8
+            delay: 15
+            changed_when: false
+
+      - name: Read existing SSM tunnel session ID
+        ansible.builtin.shell: |
+          cat "{{ ssm_tunnel_state_dir }}/ssm_tunnel_{{ ssm_tunnel_state_key_resolved }}.sid" 2>/dev/null || true
+        args: { executable: /bin/bash }
+        register: ssm_state_session_id
+        changed_when: false
+
+      - name: Check for active SSM port-forwarding sessions for this tunnel
+        ansible.builtin.shell: |
+          aws ssm describe-sessions \
+          --state "Active" \
+          --filters "key=Target,value={{instance_id}}" \
+          --query "Sessions[?DocumentName=='AWS-StartPortForwardingSession' && Reason=='{{ ssm_tunnel_state_key_resolved }}'].SessionId" \
+          --output text --region {{ ssm_region_name }}
+        args: { executable: /bin/bash }
+        register: ssm_instance_active_sessions
+        changed_when: false
+
+      - name: Probe existing local SSM tunnel listener
+        ansible.builtin.shell: |
+          (echo > /dev/tcp/127.0.0.1/{{ local_port }}) >/dev/null 2>&1
+        args: { executable: /bin/bash }
+        register: ssm_local_listener
+        failed_when: false
+        changed_when: false
+
+      # The probe above is a pure TCP-accept check against the local listener
+      # process (nohup'd `aws ssm start-session`). After an EC2 Power Off ->
+      # AMI Creation -> Power On cycle the local process is still alive and
+      # accepting connections, but the AWS data channel was torn down server-
+      # side and the Windows OS just cold-booted -- WinRM will not be ready
+      # for ~60-120s. Callers that know a disruptive event just happened
+      # (mcs_system2/aws_ami after each Power-On) set aws_ssm_force_rebuild
+      # to force the role to terminate the stale session and open a fresh
+      # one. Synthesize a non-zero rc so the downstream
+      # 'Terminate stale ... when listener is absent' and 'Start SSM port-
+      # forward' tasks fire.
+      - name: Force tunnel rebuild when caller requested it
+        ansible.builtin.set_fact:
+          ssm_local_listener: "{{ ssm_local_listener | combine({'rc': 1}) }}"
+        when: aws_ssm_force_rebuild | default(false) | bool
+
+      - name: Terminate stale active SSM sessions for this tunnel when local listener is absent
+        ansible.builtin.shell: |
+          set -euo pipefail
+          for sid in {{ ssm_state_session_id.stdout | default('') }} {{ ssm_instance_active_sessions.stdout | default('') }}; do
+            [ -n "$sid" ] && [ "$sid" != "None" ] && aws ssm terminate-session --session-id "$sid" --region {{ ssm_region_name }} >/dev/null 2>&1 || true
+          done
+        args: { executable: /bin/bash }
+        changed_when: true
+        when:
+          - ssm_local_listener.rc != 0
+          - (ssm_state_session_id.stdout | default('') | trim not in ['', 'None']) or
+            (ssm_instance_active_sessions.stdout | default('') | trim != "")
+
+      # Script shared with the post-restart retry (vars/main.yml).
+      - name: Start SSM port-forward in background (nohup)
+        ansible.builtin.shell: "{{ aws_ssm_port_forward_script }}"
+        args: { executable: /bin/bash }
+        register: ssm_run
+        until: ssm_run.rc in [0, 42]
+        retries: 5
+        delay: 10
+        failed_when: ssm_run.rc not in [0, 42]
+        changed_when: ssm_run.rc == 0
+        when: ssm_local_listener.rc != 0
+
+      - name: Restart AmazonSSMAgent on target if data channel is stuck (TargetNotConnected)
+        ansible.builtin.shell: |
+          set -euo pipefail
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids {{ instance_id }} \
+            --region {{ ssm_region_name }} \
+            --document-name AWS-RunPowerShellScript \
+            --comment "Restart AmazonSSMAgent to recover session data channel" \
+            --parameters commands="Restart-Service AmazonSSMAgent -Force" \
+            --query "Command.CommandId" \
+            --output text)
+          echo "$CMD_ID"
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id {{ instance_id }} \
+            --region {{ ssm_region_name }} || true
+        args: { executable: /bin/bash }
+        register: ssm_agent_restart
+        changed_when: true
+        when: ssm_run is defined and ssm_run.rc | default(0) == 42
+
+      - name: Wait after SSM agent restart
+        ansible.builtin.pause:
+          seconds: 45
+        when: ssm_run is defined and ssm_run.rc | default(0) == 42
+
+      - name: Retry SSM port-forward after agent restart
+        ansible.builtin.shell: "{{ aws_ssm_port_forward_script }}"
+        args: { executable: /bin/bash }
+        register: ssm_run_retry
+        until: ssm_run_retry.rc == 0
+        retries: 20
+        delay: 15
+        throttle: 1
+        when: ssm_run is defined and ssm_run.rc | default(0) == 42
+
+      - name: Consolidate port-forward run result
+        ansible.builtin.set_fact:
+          ssm_run: "{{ ssm_run_retry }}"
+        when: ssm_run_retry is defined and ssm_run_retry is not skipped
+
+      - name: Save PID and logfile
+        ansible.builtin.set_fact:
+          ssm_pid: "{{ (ssm_run.stdout_lines | last) | int }}"
+          ssm_log: "{{ (ssm_run.stdout_lines | first) }}"
+        when:
+          - ssm_local_listener is defined
+          - ssm_local_listener.rc != 0
+
+      - name: Write tunnel PID to state file
+        ansible.builtin.copy:
+          content: "{{ ssm_pid }}\n"
+          dest: "{{ ssm_tunnel_state_dir }}/ssm_tunnel_{{ ssm_tunnel_state_key_resolved }}.pid"
+          mode: '0600'
+        when: ssm_pid is defined
+
+      - name: Wait for local TCP listener
+        ansible.builtin.wait_for:
+          host: 127.0.0.1
+          port: "{{ local_port }}"
+          timeout: 120
+
+      - name: Register tunnel port for keepalive
+        ansible.builtin.copy:
+          content: "{{ local_port }}\n"
+          dest: "{{ ssm_tunnel_state_dir }}/ssm_tunnel_{{ ssm_tunnel_state_key_resolved }}.port"
+          mode: '0600'
+
+      - name: Fetch tunnel session ID
+        ansible.builtin.shell: |
+          aws ssm describe-sessions \
+            --state "Active" \
+            --filters "key=Target,value={{ instance_id }}" \
+            --query "Sessions[?DocumentName=='AWS-StartPortForwardingSession' && Reason=='{{ ssm_tunnel_state_key_resolved }}'].SessionId | [0]" \
+            --output text --region {{ ssm_region_name }}
+        args: { executable: /bin/bash }
+        register: ssm_sid_query
+        changed_when: false
+        when: ssm_pid is defined
+
+      - name: Write tunnel session ID to state file
+        ansible.builtin.copy:
+          content: "{{ ssm_sid_query.stdout | trim }}\n"
+          dest: "{{ ssm_tunnel_state_dir }}/ssm_tunnel_{{ ssm_tunnel_state_key_resolved }}.sid"
+          mode: '0600'
+        when: ssm_pid is defined and ssm_sid_query.stdout | default('') | trim not in ['', 'None']
+
+- name: Point host connection vars at the SSM tunnel
+  ansible.builtin.set_fact:
+    ansible_host: localhost
+    ansible_port: "{{ local_port }}"
+    ansible_winrm_operation_timeout_sec: "{{ aws_ssm_winrm_operation_timeout_sec }}"
+    ansible_winrm_read_timeout_sec: "{{ aws_ssm_winrm_read_timeout_sec }}"
+  when:
+    - aws_ssm_update_connection_facts | bool
+    - local_port is defined
+    - local_port | string | length > 0
+
+# pywinrm caches a TCP socket against the previous ansible_port (the dead
+# tunnel from before the SSM-reboot rebuild). Updating set_fact above does
+# not invalidate that cached socket, so the FIRST WinRM task after the
+# rebuild succeeds (fresh connect) but the SECOND reuses the now-broken
+# keep-alive socket and CredSSP receives '' for the credential exchange:
+#   "credssp: Server did not response with a CredSSP token after step
+#    Credential exchange - actual ''"
+# Force the connection plugin to drop its cached socket so the next WinRM
+# call opens a fresh TCP connection to the newly bound local_port.
+- name: Reset cached connection so next task uses the new SSM tunnel socket
+  ansible.builtin.meta: reset_connection

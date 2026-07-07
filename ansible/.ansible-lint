@@ -1,0 +1,8 @@
+---
+# Start on the "min" profile so CI stays green out of the gate.
+# Bump to "basic" or "moderate" once you've triaged the extra warnings.
+profile: min
+
+exclude_paths:
+  - tests/
+  - rdp_artifacts/

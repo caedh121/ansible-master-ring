@@ -1,0 +1,17 @@
+---
+# defaults file for transport
+#
+# Resolves which transport carries this host's WinRM connection into a single
+# fact, `winrm_via_resolved`, consumed by win_reboot, generate_rdp, and
+# any caller that needs to branch on transport.
+
+# Explicit transport selector — the preferred way to declare a host's
+# transport. One of:
+#   direct  - WinRM reachable directly, no tunnel
+#   ssm     - AWS SSM port-forward (aws_ssm_tunnel); dies on reboot
+#   iap     - GCP IAP TCP tunnel (gcp_iap_tunnel); survives reboot
+#   bastion - Azure Bastion tunnel (azure_bastion_tunnel); survives reboot
+# Empty (the default) means: derive it from `platform` and the legacy
+# use_ssm / use_iap / use_azure_bastion flags, preserving the collection's
+# historical priority (platform-native tunnel first, then SSM, then direct).
+winrm_via: ""

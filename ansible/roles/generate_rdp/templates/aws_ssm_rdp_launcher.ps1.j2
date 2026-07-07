@@ -1,0 +1,151 @@
+<#
+.SYNOPSIS
+  Open an AWS SSM tunnel to {{ rdp_target_host }} (port 3389) and launch RDP through it.
+
+.DESCRIPTION
+  Verifies prerequisites and AWS credentials, starts an SSM port-forward,
+  writes a temporary .rdp pointing at localhost, runs mstsc, and tears the
+  tunnel down when mstsc exits.
+
+  One-time workstation setup (elevated):
+    winget install Amazon.AWSCLI Amazon.SessionManagerPlugin
+
+.NOTES
+  Target host : {{ rdp_target_host }}
+  Instance ID : {{ aws_rdp_instance_id }}
+  AWS region  : {{ aws_rdp_region }}
+#>
+
+[CmdletBinding()]
+param(
+    [string]$InstanceId  = '{{ aws_rdp_instance_id }}',
+    [string]$AwsRegion   = '{{ aws_rdp_region }}',
+    [string]$AwsProfile  = '{{ aws_rdp_profile | default("", true) }}',
+    [string]$RdpUser     = '{{ domain_admin_user }}',
+    [int]   $RemotePort  = 3389,
+    [int]   $WaitSeconds = 60
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Invoke-AwsCli {
+    param([string[]]$AwsArgs, [switch]$AllowFailure)
+
+    $fullArgs = @($AwsArgs) + @('--region', $AwsRegion)
+    if ($AwsProfile) { $fullArgs += @('--profile', $AwsProfile) }
+
+    # PS 5.1: with ErrorActionPreference=Stop, any stderr line from a native
+    # command redirected via 2>&1 throws NativeCommandError before the exit
+    # code can be read. Relax the preference just for this call.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & aws @fullArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousEap }
+
+    $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
+    if ($exitCode -ne 0 -and -not $AllowFailure) {
+        throw "aws $($fullArgs -join ' ') failed with exit code $exitCode.`n$text"
+    }
+    [pscustomobject]@{ ExitCode = $exitCode; Output = $text }
+}
+
+function Get-FreeTcpPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try { return [int]$listener.LocalEndpoint.Port }
+    finally { $listener.Stop() }
+}
+
+function Test-TunnelListening {
+    param([int]$Port)
+    [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+}
+
+# --- Prerequisites ------------------------------------------------------------
+# Fresh installs land here but may not be on this window's PATH yet.
+$env:Path += ";$env:ProgramFiles\Amazon\AWSCLIV2;$env:ProgramFiles\Amazon\SessionManagerPlugin\bin"
+foreach ($tool in 'aws', 'session-manager-plugin', 'mstsc') {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+        throw "$tool not found. One-time setup (elevated): winget install Amazon.AWSCLI Amazon.SessionManagerPlugin"
+    }
+}
+
+# --- Credentials ---------------------------------------------------------------
+$identity = Invoke-AwsCli -AwsArgs @('sts', 'get-caller-identity', '--output', 'json') -AllowFailure
+if ($identity.ExitCode -ne 0) {
+    throw "AWS authentication failed:`n$($identity.Output)`nRun 'aws configure', set AWS_PROFILE, or pass -AwsProfile <name>."
+}
+$who = $identity.Output | ConvertFrom-Json
+Write-Host "Authenticated to AWS account $($who.Account) as $($who.Arn)."
+
+# --- SSM target pre-check -------------------------------------------------------
+$status = Invoke-AwsCli -AwsArgs @(
+    'ssm', 'describe-instance-information',
+    '--filters', "Key=InstanceIds,Values=$InstanceId",
+    '--query', 'InstanceInformationList[0].PingStatus',
+    '--output', 'text'
+) -AllowFailure
+$ping = if ($status.ExitCode -eq 0) { $status.Output.Trim() } else { "check failed: $($status.Output)" }
+if ($ping -eq 'Online') {
+    Write-Host "SSM target $InstanceId is Online."
+}
+else {
+    Write-Warning "SSM target $InstanceId is not Online ($ping). Is the instance running? Continuing anyway."
+}
+
+# --- Tunnel + RDP ----------------------------------------------------------------
+$localPort = Get-FreeTcpPort
+$stamp     = [guid]::NewGuid().ToString('N').Substring(0, 8)
+$rdpFile   = Join-Path $env:TEMP "aws-ssm-rdp-$stamp.rdp"
+$logOut    = Join-Path $env:TEMP "aws-ssm-rdp-$stamp.out.log"
+$logErr    = Join-Path $env:TEMP "aws-ssm-rdp-$stamp.err.log"
+
+$tunnelArgs = @(
+    'ssm', 'start-session',
+    '--target', $InstanceId,
+    '--document-name', 'AWS-StartPortForwardingSession',
+    '--parameters', "portNumber=$RemotePort,localPortNumber=$localPort",
+    '--region', $AwsRegion
+)
+if ($AwsProfile) { $tunnelArgs += @('--profile', $AwsProfile) }
+
+Write-Host "Starting SSM tunnel $InstanceId`:$RemotePort -> localhost:$localPort (logs: $logOut)"
+$tunnel = Start-Process -FilePath 'aws' -ArgumentList $tunnelArgs -WindowStyle Hidden -PassThru `
+    -RedirectStandardOutput $logOut -RedirectStandardError $logErr
+
+try {
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    while (-not (Test-TunnelListening -Port $localPort)) {
+        if ($tunnel.HasExited) {
+            Get-Content $logOut, $logErr -ErrorAction SilentlyContinue | Write-Host
+            throw "SSM tunnel process exited before opening localhost:$localPort. See output above."
+        }
+        if ((Get-Date) -ge $deadline) {
+            Get-Content $logOut, $logErr -ErrorAction SilentlyContinue | Write-Host
+            throw "Timed out after $WaitSeconds s waiting for the tunnel on localhost:$localPort."
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    @(
+        "full address:s:localhost:$localPort"
+        "username:s:$RdpUser"
+        "authentication level:i:2"
+        "enablecredsspsupport:i:1"
+        "screen mode id:i:1"
+        "use multimon:i:0"
+    ) | Set-Content -Encoding ASCII -Path $rdpFile
+
+    Write-Host "Launching mstsc against localhost:$localPort ..."
+    Start-Process -FilePath 'mstsc' -ArgumentList $rdpFile -Wait
+}
+finally {
+    if ($tunnel -and -not $tunnel.HasExited) {
+        Write-Host "Stopping SSM tunnel (pid $($tunnel.Id))..."
+        taskkill /PID $tunnel.Id /T /F | Out-Null
+    }
+    Remove-Item $rdpFile -Force -ErrorAction SilentlyContinue
+}

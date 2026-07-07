@@ -1,0 +1,22 @@
+---
+# tasks file for win_readiness
+- name: Wait for WinRM service to be running
+  wait_for_connection:
+    timeout: 1200
+    sleep: 10
+    delay: 10
+  register: result
+
+- name: Wait for explorer process to be running
+  ansible.windows.win_powershell:
+    script: |
+        Start-Process explorer.exe -ErrorAction SilentlyContinue
+        $process = Get-Process -Name 'explorer' -ErrorAction SilentlyContinue
+        if ($process) {Write-Host "running"} else {Write-Host "stopped"}
+  register: exp1_result
+  until: exp1_result.information[0].message_data.Message == "running"
+  retries: 300
+  delay: 10
+
+- debug:
+    msg: "Explorer process status is: {{exp1_result.information[0].message_data.Message}}, VM is ready to execute local commands"

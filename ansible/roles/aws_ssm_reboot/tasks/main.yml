@@ -1,0 +1,123 @@
+- name: SSM Reboot block
+  delegate_to: localhost
+  become: false
+  block:
+    - name: Set facts
+      set_fact:
+        instance_id: "{{ ansible_id }}"
+        ssm_region_name: "{{ ansible_aws_ssm_region }}"
+        local_port: "{{ ansible_port }}"
+        # Must match the key aws_ssm_tunnel uses when writing the state files,
+        # including the documented ssm_tunnel_state_key override.
+        ssm_tunnel_state_key_resolved: "{{ ssm_tunnel_state_key | default(inventory_hostname) }}"
+
+    - name: Force reboot via SSM
+      ansible.builtin.command: >
+        aws ssm send-command
+        --instance-ids {{ ansible_id }}
+        --region {{ ssm_region_name }}
+        --document-name AWS-RunPowerShellScript
+        --comment "Force reboot via SSM"
+        --parameters '{"commands":["shutdown.exe /r /f /t 3"]}'
+        --query "Command.CommandId"
+        --output text
+      register: ssm_force_reboot_cmd
+      changed_when: true
+
+    - name: Kill local SSM plugin process
+      ansible.builtin.shell: |
+        PID_FILE="{{ ssm_tunnel_state_dir }}/ssm_tunnel_{{ ssm_tunnel_state_key_resolved }}.pid"
+        if [ -f "$PID_FILE" ]; then
+          pid=$(cat "$PID_FILE")
+          kill "$pid" 2>/dev/null || true
+          sleep 1
+          kill -9 "$pid" 2>/dev/null || true
+          rm -f "$PID_FILE"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Terminate AWS SSM session
+      ansible.builtin.shell: |
+        SID_FILE="{{ ssm_tunnel_state_dir }}/ssm_tunnel_{{ ssm_tunnel_state_key_resolved }}.sid"
+        if [ -f "$SID_FILE" ]; then
+          sid=$(cat "$SID_FILE")
+          aws ssm terminate-session --session-id "$sid" --region {{ ssm_region_name }} 2>/dev/null || true
+          rm -f "$SID_FILE"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # Best-effort gate: watch PingStatus leave Online so the come-back check
+    # below cannot match the stale pre-reboot Online. Applies to EC2 (i-*) and
+    # hybrid (mi-*) alike — hybrid heartbeats refresh slowly, so this may time
+    # out without observing the drop; that is acceptable (the debounce probe
+    # below still retries until the agent genuinely executes commands).
+    # failed_when: false keeps transient AWS API errors from failing a task
+    # that is explicitly best-effort.
+    - name: Wait for SSM target to leave Online (best effort)
+      ansible.builtin.shell: |
+        set -uo pipefail
+        for _ in $(seq 1 30); do
+          status=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values={{ ansible_id }}" \
+            --region {{ ssm_region_name }} \
+            --query "InstanceInformationList[?InstanceId=='{{ ansible_id }}'].PingStatus | [0]" \
+            --output text) || status="query-error"
+          echo "$status"
+          if [ "$status" != "Online" ] && [ "$status" != "query-error" ]; then
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "SSM PingStatus stayed Online while waiting for reboot; continuing to the post-reboot readiness checks." >&2
+      args:
+        executable: /bin/bash
+      register: ssm_ping_offline
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for SSM target to come back Online
+      ansible.builtin.shell: >
+        aws ssm describe-instance-information
+        --filters "Key=InstanceIds,Values={{ ansible_id }}"
+        --region {{ ssm_region_name }}
+        --query "InstanceInformationList[?InstanceId=='{{ ansible_id }}'].PingStatus | [0]"
+        --output text
+      args:
+        executable: /bin/bash
+      register: ssm_ping_online
+      until: ssm_ping_online.stdout | trim == "Online"
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Confirm SSM agent is actually accepting commands (debounce)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CMD_ID=$(aws ssm send-command \
+          --instance-ids {{ ansible_id }} \
+          --region {{ ssm_region_name }} \
+          --document-name AWS-RunPowerShellScript \
+          --comment "Post-reboot readiness probe" \
+          --parameters commands="Write-Output ready" \
+          --query "Command.CommandId" \
+          --output text)
+        echo "$CMD_ID"
+        aws ssm wait command-executed \
+          --command-id "$CMD_ID" \
+          --instance-id {{ ansible_id }} \
+          --region {{ ssm_region_name }}
+      args:
+        executable: /bin/bash
+      register: ssm_readiness_probe
+      until: ssm_readiness_probe.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Restart SSM tunnel session
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.aws_ssm_tunnel

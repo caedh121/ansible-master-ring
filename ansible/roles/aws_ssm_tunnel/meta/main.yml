@@ -1,0 +1,19 @@
+galaxy_info:
+  author: Adrian Estrada
+  description: Establishes an SSM tunnel for WinRM access.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: CentOS
+      versions:
+        - all
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - aws
+    - ssm
+    - winrm

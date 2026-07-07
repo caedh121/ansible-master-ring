@@ -1,0 +1,25 @@
+# Default: let git decide, but honor per-pattern overrides below.
+* text=auto
+
+# Shell scripts and Dockerfile must ship with LF so they run inside Linux
+# containers regardless of the host OS's line-ending convention.
+*.sh          text eol=lf
+*.bash        text eol=lf
+Dockerfile    text eol=lf
+docker/entrypoint.sh  text eol=lf
+docker/run.sh         text eol=lf
+docker/tools-check.sh text eol=lf
+
+# YAML / config files: prefer LF for consistency with Ansible on Linux
+# controllers, but do not hard-fail Windows editors.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Windows-native scripts stay with their host's convention.
+*.ps1   text
+
+# Binary artefacts we never want line-ending converted.
+*.tar.gz binary
+*.zip    binary
+*.png    binary
+*.jpg    binary

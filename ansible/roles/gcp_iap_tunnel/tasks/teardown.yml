@@ -1,0 +1,9 @@
+# Thin wrapper: the teardown logic is shared across tunnel roles in
+# transport/tasks/_tunnel_teardown.yml. By default tears down EVERY recorded
+# IAP tunnel for the target host; set teardown_remote_port to scope to one.
+- name: Tear down IAP tunnels for this host
+  ansible.builtin.include_role:
+    name: master_ring.windows_remote.transport
+    tasks_from: _tunnel_teardown
+  vars:
+    tunnel_state_prefix: iap_tunnel

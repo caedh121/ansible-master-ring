@@ -1,0 +1,186 @@
+---
+- name: Ensure Azure Bastion tunnel state directory exists
+  ansible.builtin.file:
+    path: "{{ tunnel_state_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Azure Bastion tunnel block
+  delegate_to: localhost
+  become: false
+  block:
+    - name: Set Azure Bastion tunnel host facts
+      ansible.builtin.set_fact:
+        azure_bastion_target_host: "{{ target_host | default(inventory_hostname) }}"
+        azure_bastion_resolved_port: "{{ local_port | default(hostvars[inventory_hostname].azure_bastion_local_port | default(ansible_port | default(''), true), true) }}"
+        azure_bastion_pid_file: "{{ tunnel_state_dir }}/azure_bastion_tunnel_{{ target_host | default(inventory_hostname) }}_{{ remote_port }}.pid"
+        azure_bastion_port_file: "{{ tunnel_state_dir }}/azure_bastion_tunnel_{{ target_host | default(inventory_hostname) }}_{{ remote_port }}.port"
+
+    - name: Set Azure Bastion target facts
+      ansible.builtin.set_fact:
+        azure_bastion_target_resource_id_effective: "{{ target_resource_id | default(hostvars.get(azure_bastion_target_host, {}).get('azure_vm_resource_id', azure_vm_resource_id | default('')), true) }}"
+        azure_bastion_name_effective: "{{ azure_bastion_name | default(hostvars.get(azure_bastion_target_host, {}).get('azure_bastion_name', bastion_name | default('')), true) }}"
+        azure_bastion_resource_group_name_effective: "{{ azure_bastion_resource_group_name | default(hostvars.get(azure_bastion_target_host, {}).get('azure_bastion_resource_group_name', bastion_resource_group_name | default('')), true) }}"
+        azure_bastion_subscription_id_effective: "{{ azure_bastion_subscription_id | default(hostvars.get(azure_bastion_target_host, {}).get('azure_bastion_subscription_id', ''), true) }}"
+
+    - name: Require Azure CLI and ss (iproute2) on control node
+      ansible.builtin.shell: |
+        set -e
+        command -v az >/dev/null
+        command -v ss >/dev/null
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: Require Azure Bastion tunnel inputs
+      ansible.builtin.assert:
+        that:
+          - azure_bastion_name_effective | length > 0
+          - azure_bastion_resource_group_name_effective | length > 0
+          - azure_bastion_subscription_id_effective | length > 0
+          - azure_bastion_target_resource_id_effective | length > 0
+          - azure_bastion_resolved_port is defined
+          - azure_bastion_resolved_port | string | length > 0
+        fail_msg: >-
+          azure_bastion_tunnel needs bastion name/resource group,
+          subscription, target resource ID, and a local port.
+          Got bastion='{{ azure_bastion_name_effective | default("") }}',
+          resource_group='{{ azure_bastion_resource_group_name_effective | default("") }}',
+          subscription='{{ azure_bastion_subscription_id_effective | default("") }}',
+          target_resource_id='{{ azure_bastion_target_resource_id_effective | default("") }}',
+          local_port='{{ azure_bastion_resolved_port | default("") }}'.
+
+    # Shared ownership-verified probe (transport/tasks/_tunnel_probe.yml):
+    # reuse only when the recorded PID is alive, is an `az ... bastion tunnel`
+    # process, and owns the local listener. Registers `tunnel_probe`.
+    - name: Probe existing Azure Bastion tunnel
+      ansible.builtin.include_role:
+        name: master_ring.windows_remote.transport
+        tasks_from: _tunnel_probe
+      vars:
+        tunnel_probe_pid_file: "{{ azure_bastion_pid_file }}"
+        tunnel_probe_port: "{{ azure_bastion_resolved_port }}"
+        tunnel_probe_cmdline: bastion tunnel
+
+    - name: Start Azure Bastion tunnel
+      ansible.builtin.shell: |
+        set -uo pipefail
+        PORT="{{ azure_bastion_resolved_port }}"
+
+        # Kill a previously recorded tunnel PID (idempotent reruns within a play).
+        if [ -f "{{ azure_bastion_pid_file }}" ]; then
+          old=$(cat "{{ azure_bastion_pid_file }}" 2>/dev/null || true)
+          if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+            kill "$old" 2>/dev/null || true
+            sleep 1
+            kill -9 "$old" 2>/dev/null || true
+          fi
+          rm -f "{{ azure_bastion_pid_file }}"
+        fi
+
+        # Free the local port from any ORPHANED az bastion tunnel left behind by a
+        # previous run that never tore down. Such orphans keep the local listener
+        # open but no longer forward, so a fresh tunnel cannot bind the port and the
+        # readiness check below would otherwise see the dead orphan port as open and
+        # wrongly report success. Only `bastion tunnel` processes bound to this exact
+        # port are killed.
+        for p in $(ss -ltnp 2>/dev/null | grep -E "(127\.0\.0\.1|\[::1\]|0\.0\.0\.0|\*|\[::\]):$PORT " | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+          if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'bastion tunnel'; then
+            kill "$p" 2>/dev/null || true
+            sleep 1
+            kill -9 "$p" 2>/dev/null || true
+          fi
+        done
+
+        BASTION_LOG=$(mktemp /tmp/azure_bastion_{{ azure_bastion_target_host }}_{{ remote_port }}_XXXX.log)
+        echo "$BASTION_LOG"
+        nohup az network bastion tunnel \
+          --name {{ azure_bastion_name_effective | quote }} \
+          --resource-group {{ azure_bastion_resource_group_name_effective | quote }} \
+          --target-resource-id {{ azure_bastion_target_resource_id_effective | quote }} \
+          --resource-port {{ remote_port }} \
+          --port "$PORT" \
+          --subscription {{ azure_bastion_subscription_id_effective | quote }} \
+          >"$BASTION_LOG" 2>&1 < /dev/null &
+        launch_pid=$!
+
+        # The tunnel is ready only when an `az ... bastion tunnel` process OWNS the
+        # local listener -- not merely that some process holds the port. Echo that
+        # owning PID (which may differ from launch_pid if `az` forks its worker) so
+        # the state file records the process that actually holds the port.
+        owning_pid() {
+          local q
+          for q in $(ss -ltnp 2>/dev/null | grep -E "(127\.0\.0\.1|\[::1\]|0\.0\.0\.0|\*|\[::\]):$PORT " | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+            if tr '\0' ' ' < "/proc/$q/cmdline" 2>/dev/null | grep -q 'bastion tunnel'; then
+              echo "$q"; return 0
+            fi
+          done
+          return 1
+        }
+
+        for i in $(seq 1 45); do
+          # az has no bind-address flag and may bind 127.0.0.1, 0.0.0.0, or
+          # ::1 depending on version/stack — probe both families.
+          if op=$(owning_pid) && { (echo > /dev/tcp/127.0.0.1/$PORT) || (echo > /dev/tcp/::1/$PORT); } 2>/dev/null; then
+            echo "$op"
+            exit 0
+          fi
+          if ! kill -0 "$launch_pid" 2>/dev/null && ! owning_pid >/dev/null; then
+            echo "Azure Bastion tunnel exited before owning local port $PORT." >&2
+            cat "$BASTION_LOG" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "Timed out waiting for Azure Bastion tunnel to own local port $PORT." >&2
+        cat "$BASTION_LOG" >&2
+        kill "$launch_pid" 2>/dev/null || true
+        exit 1
+      args: { executable: /bin/bash }
+      register: azure_bastion_start
+      until: azure_bastion_start.rc == 0
+      retries: 5
+      delay: 10
+      changed_when: azure_bastion_start.rc == 0
+      when: tunnel_probe.rc != 0
+
+    - name: Save Azure Bastion tunnel PID and log
+      ansible.builtin.set_fact:
+        azure_bastion_pid: "{{ (azure_bastion_start.stdout_lines | last) | int }}"
+        azure_bastion_log: "{{ azure_bastion_start.stdout_lines | first }}"
+      when: azure_bastion_start is defined and azure_bastion_start is not skipped and azure_bastion_start.rc | default(1) == 0
+
+    - name: Write Azure Bastion tunnel PID to state file
+      ansible.builtin.copy:
+        content: "{{ azure_bastion_pid }}\n"
+        dest: "{{ azure_bastion_pid_file }}"
+        mode: '0600'
+      when: azure_bastion_pid is defined
+
+    - name: Write Azure Bastion local port to state file
+      ansible.builtin.copy:
+        content: "{{ azure_bastion_resolved_port }}\n"
+        dest: "{{ azure_bastion_port_file }}"
+        mode: '0600'
+      when: azure_bastion_pid is defined
+
+    # "localhost" (not 127.0.0.1): az may bind the listener to ::1 or 0.0.0.0
+    # depending on version/stack, so let the resolver pick the reachable family.
+    - name: Wait for Azure Bastion local TCP listener
+      ansible.builtin.wait_for:
+        host: localhost
+        port: "{{ azure_bastion_resolved_port }}"
+        timeout: 120
+
+- name: Point host connection vars at the Azure Bastion tunnel
+  ansible.builtin.set_fact:
+    ansible_host: localhost
+    ansible_port: "{{ azure_bastion_resolved_port }}"
+    ansible_winrm_operation_timeout_sec: "{{ azure_bastion_winrm_operation_timeout_sec }}"
+    ansible_winrm_read_timeout_sec: "{{ azure_bastion_winrm_read_timeout_sec }}"
+  when:
+    - (target_host | default(inventory_hostname)) == inventory_hostname
+    - azure_bastion_resolved_port is defined
+    - azure_bastion_resolved_port | string | length > 0

@@ -1,0 +1,32 @@
+---
+# Shared tunnel teardown, used by gcp_iap_tunnel and azure_bastion_tunnel so
+# the kill sequence and state-file handling live in exactly one place.
+#
+# Parameters (pass via include_role vars):
+#   tunnel_state_prefix  - state-file prefix ("iap_tunnel" | "azure_bastion_tunnel")
+#   target_host          - host whose tunnels to tear down (default: inventory_hostname)
+#   teardown_remote_port - scope to one remote port (default: ALL ports for the host)
+#   tunnel_state_dir     - state directory (falls back to ssm_tunnel_state_dir,
+#                          then /tmp/ansible_tunnels)
+#
+# By default this tears down EVERY recorded tunnel for the target host, not
+# just the default remote_port: rebuilding the state path from a role default
+# would miss tunnels opened on other ports (e.g. 443) when the caller does not
+# re-pass remote_port at teardown time — leaking the tunnel process and its
+# local listener.
+- name: Tear down recorded tunnels and remove state files
+  ansible.builtin.shell: |
+    shopt -s nullglob
+    for PID_FILE in {{ tunnel_state_dir | default(ssm_tunnel_state_dir | default('/tmp/ansible_tunnels')) }}/{{ tunnel_state_prefix }}_{{ target_host | default(inventory_hostname) }}_{{ teardown_remote_port | default('*') }}.pid; do
+      pid=$(cat "$PID_FILE" 2>/dev/null || true)
+      if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      rm -f "$PID_FILE" "${PID_FILE%.pid}.port"
+    done
+  args: { executable: /bin/bash }
+  delegate_to: localhost
+  become: false
+  changed_when: false

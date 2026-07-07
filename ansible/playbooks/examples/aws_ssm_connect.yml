@@ -1,0 +1,36 @@
+---
+# AWS: reach Windows VMs over WinRM via SSM tunnels, verify ready, do work,
+# then reboot through the tunnel-aware SSM reboot path.
+#
+# Inventory must set per host:
+#   ansible_id              SSM target ID (i-... for EC2, mi-... for hybrid)
+#   ansible_aws_ssm_region  AWS region of the instance
+#   ansible_port            unique local tunnel port on the controller
+#   ansible_user / ansible_password (+ WinRM connection vars)
+#
+# Run:
+#   ansible-playbook -i inventory playbooks/examples/aws_ssm_connect.yml
+- name: Manage Windows targets on AWS via SSM
+  hosts: windows_targets
+  gather_facts: false
+  vars:
+    platform: aws
+    winrm_via: ssm   # explicit transport; legacy `use_ssm: true` also works
+  pre_tasks:
+    - name: Open the SSM tunnel to WinRM (repoints ansible_host/port to localhost)
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.aws_ssm_tunnel
+
+    - name: Wait until WinRM + Explorer are up
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.win_readiness
+
+  tasks:
+    - name: Example work over the tunneled WinRM connection
+      ansible.windows.win_ping:
+
+  post_tasks:
+    - name: Reboot via the SSM-aware reboot path (rebuilds the tunnel afterward)
+      ansible.builtin.import_role:
+        name: master_ring.windows_remote.win_reboot
+      when: reboot_needed | default(false)

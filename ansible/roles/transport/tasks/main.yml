@@ -1,0 +1,40 @@
+---
+# Resolve the host's WinRM transport into one fact. Single source of truth:
+# every consumer (win_reboot dispatch, generate_rdp artifact selection, caller
+# playbooks) branches on `winrm_via_resolved` instead of re-deriving the
+# platform/use_* boolean lattice — which is how transport-mismatch bugs (reboot
+# over SSM while the tunnel and RDP artifacts assume IAP) happened.
+
+- name: Validate explicit winrm_via value
+  ansible.builtin.assert:
+    that:
+      - winrm_via in ['direct', 'ssm', 'iap', 'bastion']
+    fail_msg: >-
+      winrm_via='{{ winrm_via }}' is not a valid transport.
+      Use one of: direct, ssm, iap, bastion (or leave it unset to derive
+      from platform and the legacy use_* flags).
+  when: (winrm_via | default('', true) | string | length) > 0
+
+# Legacy derivation (used only when winrm_via is unset), preserving the
+# collection's historical priority:
+#   1. GCP with use_iap (defaults TRUE for GCP)        -> iap
+#   2. Azure with use_azure_bastion (defaults false)   -> bastion
+#   3. use_ssm (defaults false)                        -> ssm
+#   4. otherwise                                       -> direct
+# Platform-native tunnels outrank SSM because their controller-side processes
+# survive guest reboots, so SSM on such hosts is a side-channel, not the
+# WinRM transport.
+- name: Resolve WinRM transport
+  ansible.builtin.set_fact:
+    winrm_via_resolved: >-
+      {%- if (winrm_via | default('', true) | string | length) > 0 -%}
+      {{ winrm_via }}
+      {%- elif (platform | default('') | lower == 'gcp') and (use_iap | default(true) | bool) -%}
+      iap
+      {%- elif (platform | default('') | lower == 'azure') and (use_azure_bastion | default(false) | bool) -%}
+      bastion
+      {%- elif use_ssm | default(false) | bool -%}
+      ssm
+      {%- else -%}
+      direct
+      {%- endif -%}

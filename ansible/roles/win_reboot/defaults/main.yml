@@ -1,0 +1,9 @@
+reboot_pre_delay: 3        # seconds before OS initiates shutdown (gives agent time to acknowledge)
+reboot_timeout: 1000       # seconds to wait for host to come back (sized for DC promotion)
+reboot_post_delay: 0       # seconds to wait after host responds before continuing
+# Transport selection is owned by the transport role (imported by this
+# role's tasks): set `winrm_via` (direct|ssm|iap|bastion) explicitly, or
+# let it derive from `platform` + the legacy use_ssm/use_iap/use_azure_bastion
+# flags. No transport flags are defaulted here — the resolver owns the
+# defaults so every consumer agrees.
+ssm_tunnel_state_dir: /tmp/ansible_tunnels

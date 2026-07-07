@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint (yamllint + ansible-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters and collection deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ansible-core>=2.15,<2.18" "ansible-lint>=6.22" "yamllint>=1.35"
+          ansible-galaxy collection install ansible.windows community.general
+
+      - name: yamllint
+        run: yamllint .
+
+      - name: ansible-lint
+        working-directory: ansible
+        run: ansible-lint
+
+  build:
+    name: Build collection artifact
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ansible-core
+        run: pip install "ansible-core>=2.15"
+
+      - name: Build collection
+        working-directory: ansible
+        run: ansible-galaxy collection build --force
+
+      - name: Upload collection tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: collection-tarball
+          path: ansible/*.tar.gz
+          retention-days: 14
