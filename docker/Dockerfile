@@ -47,8 +47,16 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -
 
 # AWS Session Manager plugin — REQUIRED by aws_ssm_tunnel.
 # `aws ssm start-session` shells out to it to do the actual port-forward.
-RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${ARCH}/session-manager-plugin.deb" \
+# AWS publishes the .deb under path segments that DO NOT match the Debian
+# arch names (dpkg says `amd64` but the S3 path is `ubuntu_64bit`), so we
+# translate here — otherwise the fetch 403s because the object doesn't
+# exist at the `ubuntu_amd64` path.
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) SSM_ARCH="ubuntu_64bit" ;; \
+        arm64) SSM_ARCH="ubuntu_arm64" ;; \
+        *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/${SSM_ARCH}/session-manager-plugin.deb" \
         -o /tmp/ssm-plugin.deb \
     && apt-get install -y /tmp/ssm-plugin.deb \
     && rm /tmp/ssm-plugin.deb
