@@ -4,12 +4,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![ansible-core](https://img.shields.io/badge/ansible--core-%E2%89%A5%202.15-black?logo=ansible)](https://docs.ansible.com/)
 
-**Manage Windows VMs over WinRM from a Linux Ansible controller across AWS, Azure, and GCP — without a VPN.**
+**Zero-trust Ansible for Windows across AWS, Azure, and GCP.**
+**One playbook, three clouds — no public IPs on the targets, no jump boxes, no standing network path from the operator to the workload.**
 
-Each cloud already ships an authenticated, audited, identity-based tunnel to
-private instances (AWS SSM, Azure Bastion, GCP IAP). This collection wraps
-them so a single inventory and play reaches Windows over WinRM through
-whichever tunnel the target's cloud provides.
+The targets can sit in private subnets with every inbound port closed.
+Access to WinRM is opened per-VM, per-session, authenticated by IAM, and
+logged to the cloud's native audit trail — via the tunnel each cloud
+already ships for exactly this pattern: **AWS SSM**, **Azure Bastion**,
+**GCP IAP**. This collection wraps all three behind a single Ansible
+interface so the same play manages Windows on any of them.
 
 ## Architecture
 

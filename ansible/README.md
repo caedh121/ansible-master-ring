@@ -4,22 +4,26 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![ansible-core](https://img.shields.io/badge/ansible--core-%E2%89%A5%202.15-black?logo=ansible)](https://docs.ansible.com/)
 
-Manage Windows VMs over WinRM from an on-prem **Linux** Ansible controller across
-**AWS, Azure, and GCP — without a VPN.**
+**Zero-trust Ansible for Windows across AWS, Azure, and GCP.** Manage
+Windows VMs sitting in private subnets — with no public IP, no jump box,
+and no standing inbound network path — from a Linux Ansible controller.
 
 ## The problem
 
-Your Ansible controller sits on-prem (or in one cloud) and needs to configure
-Windows VMs across AWS, Azure, and GCP. Those VMs have **no inbound network
-path** to the controller: WinRM (5985/5986) is not reachable directly, by design.
+Windows fleets increasingly live in **fully private subnets** across
+multiple clouds: no public IP, no NAT ingress, no operator-facing jump
+box. That's the correct posture — every inbound path is another attack
+surface — but it leaves Ansible (which speaks WinRM 5985/5986) with no
+route to the target.
 
 ## The answer
 
-Each cloud ships an identity-based tunnel to a private instance — AWS SSM,
-Azure Bastion, GCP IAP. This collection wraps all three behind one Ansible
-interface so a single inventory + play reaches Windows through whichever
-tunnel the target's cloud provides: per-VM, per-session, IAM-scoped, and
-logged to the cloud's native audit trail.
+Each cloud already ships an identity-based tunnel to private instances
+exactly for this: **AWS SSM**, **Azure Bastion**, **GCP IAP**. Access is
+**per-VM**, **per-session**, **IAM-authenticated**, and **logged to the
+cloud's native audit trail**. This collection wraps all three behind
+one Ansible interface so a single inventory + play manages Windows on
+any of them:
 
 | Cloud | Tunnel | Underlying CLI |
 |-------|--------|----------------|
