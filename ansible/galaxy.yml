@@ -23,7 +23,11 @@ tags:
 dependencies:
   # win_readiness uses ansible.windows.win_powershell, added in 1.5.0.
   ansible.windows: ">=1.5.0"
-  community.general: ">=3.0.0"
+  # generate_rdp uses community.general.archive + community.general.mail.
+  # Cap below 11.x because community.general 11+ requires ansible-core
+  # 2.19+, which is outside our supported range (2.15-2.17). 10.x is
+  # the latest that works with ansible-core 2.17.
+  community.general: ">=3.0.0,<11.0.0"
 repository: https://github.com/caedh121/ansible-master-ring
 documentation: https://github.com/caedh121/ansible-master-ring/blob/main/ansible/README.md
 homepage: https://github.com/caedh121/ansible-master-ring

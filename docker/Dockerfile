@@ -68,9 +68,10 @@ RUN pip3 install --no-cache-dir \
         "pywinrm>=0.4" requests-credssp
 
 # Warm the collection cache; entrypoint reinstalls from the mounted repo
-# so version drift with galaxy.yml is corrected at start-up.
+# so version drift with galaxy.yml is corrected at start-up. community.general
+# is capped below 11.x because 11+ requires ansible-core 2.19+ (we pin <2.18).
 RUN ansible-galaxy collection install \
-        "ansible.windows:>=1.5.0" "community.general:>=3.0.0"
+        "ansible.windows:>=1.5.0" "community.general:>=3.0.0,<11.0.0"
 
 WORKDIR /work
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
