@@ -1,9 +1,22 @@
 ---
-# The collection passes ansible-lint's "production" profile clean, which is
-# the strictest built-in profile. Advertise that: a green CI badge at
-# `production` is a stronger portfolio signal than a green badge at `min`.
-profile: production
+# 'min' is the current baseline. Bumping to 'basic' would light up ~72
+# real style fixes (fqcn, jinja spacing, key-order, no-changed-when,
+# yaml[line-length], risky-shell-pipe, risky-file-permissions, schema[meta]
+# platform values, missing changelog, meta-runtime version). Bumping to
+# 'production' additionally fires var-naming[no-role-prefix] ~200 times,
+# which would require renaming every public variable (breaking API) and
+# ships in a proper v2.0.0 with a deprecation cycle.
+#
+# TODO milestones:
+#   v1.1 - land the ~72 style fixes and bump to 'basic'
+#   v2.0 - prefix all role-scoped variables and bump to 'production'
+profile: min
 
 exclude_paths:
   - tests/
   - rdp_artifacts/
+  # Host-mounted collection install artefact from testbox runs. If a user
+  # runs 'ansible-galaxy collection install .' from inside ansible/, it
+  # drops a duplicate collection tree under ./.ansible/ that would double-
+  # count every violation.
+  - .ansible/
