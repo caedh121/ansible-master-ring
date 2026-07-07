@@ -42,14 +42,14 @@ cat <<BANNER
                                        (lives OUTSIDE the repo; never committed)
  Cred mounts: ~/.aws ~/.azure ~/.config/gcloud (if present on the host)
 
- Try:
-   tools-check                                        # health-check every CLI
-   ansible-lint /work/repo/ansible                    # match what CI runs
-   ls /work/repo/ansible/roles                        # available roles
-   less /work/repo/ansible/roles/aws_ssm_tunnel/README.md  # role docs
+ Try (shell already cd'd to /work/repo/ansible so configs are picked up):
+   tools-check                                    # health-check every CLI
+   ansible-lint                                   # what CI runs (picks up .ansible-lint)
+   ls roles                                       # available roles
+   less roles/aws_ssm_tunnel/README.md            # role docs
 
- Then wire up an inventory (see /work/repo/ansible/playbooks/examples/) and
- run the quick-start playbook for whichever cloud you're testing against.
+ Then wire up an inventory (see playbooks/examples/) and run the quick-start
+ playbook for whichever cloud you're testing against.
 
  Rules: NO commits/pushes from this container. Environment specifics go in
  inventory / env vars, never in committed files.
@@ -57,4 +57,9 @@ cat <<BANNER
 
 BANNER
 
+# Drop the user into the collection root, not /work. This matters because
+# ansible-lint searches for .ansible-lint from CWD upward; if you're at
+# /work when you run it, the config is missed and the default (basic)
+# profile fires ~275 style rules instead of the configured 'min'.
+cd /work/repo/ansible
 exec "${@:-bash}"

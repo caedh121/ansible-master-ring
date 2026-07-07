@@ -18,5 +18,9 @@ exclude_paths:
   # Host-mounted collection install artefact from testbox runs. If a user
   # runs 'ansible-galaxy collection install .' from inside ansible/, it
   # drops a duplicate collection tree under ./.ansible/ that would double-
-  # count every violation.
-  - .ansible/
+  # count every violation. Match both the literal path and any nested
+  # ansible_collections tree in case the pattern normalisation gets
+  # applied at a different depth.
+  - .ansible
+  - .ansible/collections
+  - "**/.ansible/collections/**"
