@@ -1,6 +1,6 @@
 # ==== customize these per host in inventory ====
 
-ssm_region_name:  "us-west-2"
+ssm_region_name: "us-west-2"
 remote_port: 5986          # WinRM port on the managed node: 5985=HTTP, 5986=HTTPS
 local_port:                # unique local listener port on the control node (set per host in inventory)
 use_ssm: false
